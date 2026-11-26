@@ -1,0 +1,4 @@
+---
+deployment:
+  tasks:
+    - /bin/bash "$HOME/repositories/tito_trazabilidad/scripts/deploy-cpanel.sh"

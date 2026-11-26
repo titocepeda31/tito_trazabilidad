@@ -13,6 +13,7 @@ import ClientsPanel from './ClientsPanel.jsx';
 import FinancialSummary from './FinancialSummary.jsx';
 import WarehousesPanel from './WarehousesPanel.jsx';
 import AccountPanel from './AccountPanel.jsx';
+import OrganizationPanel from './OrganizationPanel.jsx';
 import RemoteApprovalsPanel from './RemoteApprovalsPanel.jsx';
 import {installOneSignalDevVerification} from './onesignalVerify.js';
 import useCashierApprovalQueue from './useCashierApprovalQueue.js';
@@ -46,6 +47,7 @@ const menu = [
   { key: 'clientes', label: 'Clientes y crédito', ico: '♧' },
   { key: 'cotizaciones', label: 'Cotizar', ico: '▤' },
   { key: 'aprobaciones', label: 'Autorizaciones', ico: '✓' },
+  { key: 'organizacion', label: 'Empresas y sucursales', ico: '▦' },
   { key: 'usuarios', label: 'Usuarios', ico: '♙' },
   { key: 'cuenta', label: 'Mi cuenta', ico: '♙' }
 ];
@@ -253,7 +255,7 @@ function App() {
   const pendingApprovals=approvalRequests.filter(r=>r.status==='pending').length;
   const canApproveDiscounts=isAdmin||staffPermissions.can_approve_discounts;
   const canSellCredit=isAdmin||staffPermissions.can_sell_credit;
-  const visibleMenu = isAdmin ? menu : menu.filter(m => !['importar','usuarios','recepciones','cotizaciones','bodegas','devoluciones','clientes'].includes(m.key) && (m.key!=='aprobaciones'||canApproveDiscounts));
+  const visibleMenu = isAdmin ? menu : menu.filter(m => !['importar','usuarios','recepciones','cotizaciones','bodegas','devoluciones','clientes','organizacion'].includes(m.key) && (m.key!=='aprobaciones'||canApproveDiscounts));
   const critical = products.filter(p => Number(p.stock_qty) <= 5);
   const stockValue = products.reduce((total,p) => total + Number(p.stock_qty) * Number(p.price_clp), 0);
   const dateCL = d => d.toLocaleDateString('sv-SE', {timeZone:'America/Santiago'});
@@ -311,6 +313,7 @@ function App() {
           <p className="helper">No se enviarán ventas ni abonos hasta confirmar una sesión abierta de esta sucursal.</p>
         </section>}
         <div style={{display:page==='vender'&&salesScreenReady?'contents':'none'}}>{terminalCanSell&&cashCanSell&&<SellPanel key={'terminal-'+terminalVersion+'-'+terminalStatus.terminal.id+'-'+cashStatus.session.id} products={products} request={request} refresh={()=>refresh(false)} notify={notify} canDiscount={isAdmin} canApproveDiscount={canApproveDiscounts} canRegisterCredit={canSellCredit} isAdmin={isAdmin} terminalStatus={terminalStatus} cashStatus={cashStatus} onCashChanged={async()=>{try{setCashStatus(await api('/cash/current',{token}));}catch{setCashStatus(null);}}} onOpenCash={()=>setPage('caja')} onShowSales={()=>setPage('ventas')} businessName={user?.business_name||'Tito POS'} active={page==='vender'} newSaleRequest={newSaleRequest} />}</div>
+        {page==='organizacion' && isAdmin && <OrganizationPanel request={request} notify={notify} />}
         {page==='usuarios' && isAdmin && <UsersPanel request={request} notify={notify} ownId={Number(user?.id)} />}
         {page==='cuenta' && <AccountPanel user={user} request={request} notify={notify} onPasswordChanged={()=>{endSession();setPage('inicio');notify('Contraseña actualizada. Inicia sesión nuevamente.','success');}} />}
         {page==='ventas' && <SalesPanel sales={sales} onRefresh={()=>refresh(true)} request={request} notify={notify} canVoid={isAdmin} onStartReturn={id=>{setReturnSaleId(id);setPage('devoluciones');}} businessName={user?.business_name||'Tito POS'} />}

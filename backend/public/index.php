@@ -13,6 +13,7 @@ require __DIR__ . '/../private/bootstrap.php';
 require __DIR__ . '/../private/http.php';
 require __DIR__ . '/../private/import_products.php';
 require __DIR__ . '/../private/users_sales.php';
+require __DIR__ . '/../private/organization.php';
 require __DIR__ . '/../private/catalog_maintenance.php';
 require __DIR__ . '/../private/receipts.php';
 require __DIR__ . '/../private/inventory_reports.php';
@@ -278,6 +279,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
         }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
     });
     registerUserAndSaleDetailRoutes($group);
+    registerOrganizationRoutes($group);
     registerCatalogMaintenanceRoutes($group);
     registerGoodsReceiptRoutes($group);
     registerInventoryReportRoutes($group);

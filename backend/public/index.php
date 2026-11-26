@@ -14,6 +14,7 @@ require __DIR__ . '/../private/http.php';
 require __DIR__ . '/../private/import_products.php';
 require __DIR__ . '/../private/users_sales.php';
 require __DIR__ . '/../private/organization.php';
+require __DIR__ . '/../private/platform.php';
 require __DIR__ . '/../private/catalog_maintenance.php';
 require __DIR__ . '/../private/receipts.php';
 require __DIR__ . '/../private/inventory_reports.php';
@@ -66,7 +67,15 @@ $errorMiddleware->setDefaultErrorHandler(function(Request $request, Throwable $e
         $message='No fue posible completar la operación.';
     }
     $response=$app->getResponseFactory()->createResponse();
-    return respond($response,['error'=>$message],$status);
+    $response=respond($response,['error'=>$message],$status);
+    // El middleware de error está fuera de CORS; devolver el error legible solo al origen permitido.
+    $origin=$request->getHeaderLine('Origin');
+    try {
+        if($origin!=='' && in_array($origin,config()['allowed_origins']??[],true)){
+            $response=$response->withHeader('Access-Control-Allow-Origin',$origin)->withHeader('Vary','Origin');
+        }
+    }catch(Throwable){}
+    return $response;
 });
 
 $app->options('/{routes:.*}', static function(Request $request,Response $response): Response {
@@ -296,5 +305,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
     registerOneSignalPushRoutes($group);
     registerDelegatedPermissionsRoutes($group);
 })->add($authMiddleware);
+
+registerPlatformRoutes($app);
 
 $app->run();

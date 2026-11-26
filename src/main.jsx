@@ -14,6 +14,7 @@ import FinancialSummary from './FinancialSummary.jsx';
 import WarehousesPanel from './WarehousesPanel.jsx';
 import AccountPanel from './AccountPanel.jsx';
 import OrganizationPanel from './OrganizationPanel.jsx';
+import PlatformPanel from './PlatformPanel.jsx';
 import RemoteApprovalsPanel from './RemoteApprovalsPanel.jsx';
 import {installOneSignalDevVerification} from './onesignalVerify.js';
 import useCashierApprovalQueue from './useCashierApprovalQueue.js';
@@ -1094,4 +1095,4 @@ function UsersPanel({request,notify,ownId}) {
 }
 function Modal({title,onClose,children}) { useEffect(()=>{function esc(e){if(e.key==='Escape')onClose();}document.addEventListener('keydown',esc);return()=>document.removeEventListener('keydown',esc);},[onClose]);return <div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}><div className="modal" role="dialog" aria-modal="true" aria-label={title}><div className="modal-head"><h3>{title}</h3><button className="ghost close" onClick={onClose} aria-label="Cerrar">×</button></div>{children}</div></div>}
 
-createRoot(document.getElementById('root')).render(<App/>);
+createRoot(document.getElementById('root')).render(new URLSearchParams(window.location.search).get('platform')==='1'?<PlatformPanel/>:<App/>);

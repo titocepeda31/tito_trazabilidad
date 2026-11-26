@@ -386,7 +386,7 @@ function registerWarehouseRoutes(RouteCollectorProxy $group): void {
     });
     $group->get('/warehouses/stock',static function(Request $request,Response $response): Response {
         $user=$request->getAttribute('currentUser');$biz=(int)$user['business_id'];
-        $st=db()->prepare("SELECT p.id AS product_id,p.name,p.sku,p.sale_unit,p.stock_qty AS total_qty,p.is_active,COALESCE(SUM(CASE WHEN w.code='local' THEN ws.qty ELSE 0 END),0) AS local_qty,COALESCE(SUM(CASE WHEN w.code='bodega' THEN ws.qty ELSE 0 END),0) AS bodega_qty FROM products p LEFT JOIN warehouse_stocks ws ON ws.product_id=p.id AND ws.business_id=p.business_id LEFT JOIN warehouses w ON w.id=ws.warehouse_id AND w.business_id=p.business_id WHERE p.business_id=? GROUP BY p.id,p.name,p.sku,p.sale_unit,p.stock_qty,p.is_active ORDER BY p.name,p.id LIMIT 3000");
+        $st=db()->prepare("SELECT p.id AS product_id,p.name,p.sku,p.sale_unit,p.stock_qty AS total_qty,p.is_active,EXISTS(SELECT 1 FROM serial_product_controls c WHERE c.product_id=p.id AND c.business_id=p.business_id) AS serial_control,COALESCE(SUM(CASE WHEN w.code='local' THEN ws.qty ELSE 0 END),0) AS local_qty,COALESCE(SUM(CASE WHEN w.code='bodega' THEN ws.qty ELSE 0 END),0) AS bodega_qty FROM products p LEFT JOIN warehouse_stocks ws ON ws.product_id=p.id AND ws.business_id=p.business_id LEFT JOIN warehouses w ON w.id=ws.warehouse_id AND w.business_id=p.business_id WHERE p.business_id=? GROUP BY p.id,p.business_id,p.name,p.sku,p.sale_unit,p.stock_qty,p.is_active ORDER BY p.name,p.id LIMIT 3000");
         $st->execute([$biz]);
         $stocks=$st->fetchAll();
         // Exponer saldos por cualquier sucursal/bodega, manteniendo local_qty
@@ -421,7 +421,11 @@ function registerWarehouseRoutes(RouteCollectorProxy $group): void {
         if(!$transfer)fail('Traslado no encontrado.',404);
         $st=db()->prepare('SELECT ti.product_id,p.name,ti.quantity,ti.source_before,ti.source_after,ti.target_before,ti.target_after,p.sale_unit FROM warehouse_transfer_items ti JOIN products p ON p.id=ti.product_id WHERE ti.transfer_id=? AND p.business_id=? ORDER BY ti.id');
         $st->execute([$id,$biz]);
-        return respond($response,['transfer'=>$transfer,'items'=>$st->fetchAll()]);
+        $items=$st->fetchAll();
+        $st=db()->prepare("SELECT x.product_id,x.serial_number FROM serial_unit_events e JOIN serial_units x ON x.id=e.unit_id AND x.business_id=e.business_id WHERE e.business_id=? AND e.event_type='transferred' AND JSON_UNQUOTE(JSON_EXTRACT(e.details,'$.transfer_id'))=? ORDER BY x.serial_number");
+        $st->execute([$biz,(string)$id]);$map=[];foreach($st->fetchAll() as $r)$map[$r['product_id']][]=$r['serial_number'];
+        foreach($items as &$item)$item['serial_numbers']=$map[$item['product_id']]??[];unset($item);
+        return respond($response,['transfer'=>$transfer,'items'=>$items]);
     });
     $group->post('/warehouse-transfers',static function(Request $request,Response $response): Response {
         $admin=adminOnly($request);$biz=(int)$admin['business_id'];$uid=(int)$admin['id'];
@@ -435,18 +439,23 @@ function registerWarehouseRoutes(RouteCollectorProxy $group): void {
         $note=requireString($b,'note',250);
         $items=$b['items']??null;
         if(!is_array($items)||!array_is_list($items)||count($items)<1||count($items)>50)fail('Ingresa entre 1 y 50 productos.',422);
-        $specs=[];
+        $specs=[];$serialSpecs=[];
         foreach($items as $item){
-            if(!is_array($item)||array_diff(array_keys($item),['product_id','quantity']))fail('Datos de traslado inválidos.',422);
+            if(!is_array($item)||array_diff(array_keys($item),['product_id','quantity','serial_numbers']))fail('Datos de traslado inválidos.',422);
             $pid=filter_var($item['product_id']??null,FILTER_VALIDATE_INT,['options'=>['min_range'=>1]]);
             if($pid===false||isset($specs[$pid]))fail('Producto duplicado o inválido.',422);
             $specs[$pid]=$item['quantity']??null;
+            if(array_key_exists('serial_numbers',$item))$serialSpecs[$pid]=serialNormalizeList($item['serial_numbers']);
         }
         ksort($specs,SORT_NUMERIC);
-        $hash=hash('sha256',json_encode([$source,$target,$note,$specs],JSON_THROW_ON_ERROR));
+        ksort($serialSpecs,SORT_NUMERIC);$canonical=[$source,$target,$note,$specs];if($serialSpecs)$canonical[]=$serialSpecs;
+        $hash=hash('sha256',json_encode($canonical,JSON_THROW_ON_ERROR));
         $db=db();
         try{
             $db->beginTransaction();
+            originLockCompany($db,$biz);
+            $st=$db->prepare('SELECT id,payload_hash FROM warehouse_transfers WHERE business_id=? AND request_id=? FOR UPDATE');$st->execute([$biz,strtolower($rid)]);$old=$st->fetch();$st->closeCursor();
+            if($old){if(!hash_equals((string)$old['payload_hash'],$hash))fail('Solicitud reutilizada con otros datos.',409);$db->commit();return respond($response,['ok'=>true,'transfer_id'=>(int)$old['id'],'already_recorded'=>true,'global_stock_unchanged'=>true]);}
             $st=$db->prepare('SELECT id FROM warehouses WHERE business_id=? AND is_active=1 AND id IN (?,?)');
             $st->execute([$biz,$source,$target]);$valid=$st->fetchAll();
             if(count($valid)!==2)fail('Ubicaciones no válidas.',422);
@@ -460,9 +469,13 @@ function registerWarehouseRoutes(RouteCollectorProxy $group): void {
             foreach($specs as $pid=>$qtyRaw){
                 $pLock->execute([$pid,$biz]);$p=$pLock->fetch();$pLock->closeCursor();
                 if(!$p)fail('Producto no disponible: '.$pid,422);
-                serialRejectLegacy($db,$biz,$pid);
+                $controlled=serialControlled($db,$biz,$pid);$numbers=$serialSpecs[$pid]??[];
                 $qty=decimalQuantity($qtyRaw,false,$p['sale_unit']!=='unidad');
                 if((float)$qty<=0)fail('La cantidad debe ser positiva.',422);
+                if($controlled){
+                    if((float)$qty!==(float)count($numbers)||$p['sale_unit']!=='unidad')throw new HttpError('Selecciona una serie por unidad de '.$p['name'].'.',422,'serial_numbers');
+                    serialReconcile($db,$biz,$pid,(float)$p['stock_qty']);
+                }elseif(array_key_exists($pid,$serialSpecs))fail('Este producto no tiene control de serie.',422);
                 $bal->execute([$biz,$pid,$source,$target]);
                 $rows=$bal->fetchAll();$bal->closeCursor();
                 $stocks=[];
@@ -474,6 +487,7 @@ function registerWarehouseRoutes(RouteCollectorProxy $group): void {
                 if((float)$to>1000000000)fail('Stock destino fuera de rango.',422);
                 $upd->execute([$from,$biz,$pid,$source]);$upd->execute([$to,$biz,$pid,$target]);
                 $ins->execute([$tid,$pid,$qty,number_format($stocks[$source],3,'.',''),$from,number_format($stocks[$target],3,'.',''),$to]);
+                if($controlled){serialTransfer($db,$admin,$pid,$source,$target,$tid,$note,$numbers);serialReconcile($db,$biz,$pid,(float)$p['stock_qty']);}
             }
             $db->commit();
             return respond($response,['ok'=>true,'transfer_id'=>$tid,'moved_products'=>count($specs),'global_stock_unchanged'=>true],201);

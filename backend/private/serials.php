@@ -45,7 +45,32 @@ function serialReceive(PDO $db,array $actor,int $pid,int $receipt,int $supplier,
         $event->execute([$biz,$id,$uid,json_encode(['receipt_id'=>$receipt,'supplier_id'=>$supplier,'warehouse_id'=>$warehouse,'unit_cost_clp'=>$cost],JSON_THROW_ON_ERROR)]);
     }
 }
+function serialTransfer(PDO $db,array $actor,int $pid,int $source,int $target,int $transfer,string $note,array $numbers): void {
+    $biz=(int)$actor['business_id'];$uid=(int)$actor['id'];
+    $get=$db->prepare("SELECT id FROM serial_units WHERE business_id=? AND product_id=? AND serial_number=? AND warehouse_id=? AND status='in_stock' FOR UPDATE");
+    $update=$db->prepare("UPDATE serial_units SET warehouse_id=? WHERE business_id=? AND id=? AND warehouse_id=? AND status='in_stock'");
+    $event=$db->prepare("INSERT INTO serial_unit_events(business_id,unit_id,actor_id,event_type,details) VALUES(?,?,?,'transferred',?)");
+    $s=$db->prepare('SELECT id,name FROM warehouses WHERE business_id=? AND id IN (?,?)');$s->execute([$biz,$source,$target]);$names=[];foreach($s->fetchAll() as $r)$names[(int)$r['id']]=$r['name'];
+    if(count($names)!==2)fail('Ubicaciones inconsistentes.',409);
+    $details=json_encode(['transfer_id'=>$transfer,'source_warehouse_id'=>$source,'source_name'=>$names[$source],'target_warehouse_id'=>$target,'target_name'=>$names[$target],'note'=>$note],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE);
+    foreach($numbers as $number){
+        $get->execute([$biz,$pid,$number,$source]);$id=$get->fetchColumn();$get->closeCursor();
+        if($id===false)throw new HttpError('Serie no disponible en la bodega de origen: '.$number,409,'serial_numbers');
+        $update->execute([$target,$biz,$id,$source]);if($update->rowCount()!==1)fail('La ubicación de la unidad cambió.',409);
+        $event->execute([$biz,$id,$uid,$details]);
+    }
+}
 function registerSerialRoutes(RouteCollectorProxy $group): void {
+    $group->get('/serials/available',static function(Request $request,Response $response): Response {
+        $u=adminOnly($request);$biz=(int)$u['business_id'];$q=$request->getQueryParams();
+        $pid=filter_var($q['product_id']??null,FILTER_VALIDATE_INT,['options'=>['min_range'=>1]]);
+        $wid=filter_var($q['warehouse_id']??null,FILTER_VALIDATE_INT,['options'=>['min_range'=>1]]);
+        $search=$q['q']??'';
+        if($pid===false||$wid===false||!is_string($search)||mb_strlen($search)>120)fail('Filtros inválidos.',422);
+        $s=db()->prepare("SELECT x.id,x.serial_number FROM serial_units x JOIN products p ON p.id=x.product_id AND p.business_id=x.business_id AND p.is_active=1 JOIN warehouses w ON w.id=x.warehouse_id AND w.business_id=x.business_id AND w.is_active=1 WHERE x.business_id=? AND x.product_id=? AND x.warehouse_id=? AND x.status='in_stock' AND x.serial_number LIKE ? ORDER BY x.serial_number LIMIT 501");
+        $s->execute([$biz,$pid,$wid,'%'.mb_strtoupper(trim($search),'UTF-8').'%']);$rows=$s->fetchAll();$more=count($rows)>500;
+        return respond($response,['units'=>array_slice($rows,0,500),'more'=>$more]);
+    });
     $group->get('/serials/products',static function(Request $request,Response $response): Response {
         $u=adminOnly($request);$biz=(int)$u['business_id'];$q=$request->getQueryParams()['q']??'';
         if(!is_string($q)||mb_strlen($q)>120)fail('Búsqueda inválida.',422);

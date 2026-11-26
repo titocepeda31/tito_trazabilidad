@@ -29,6 +29,8 @@ if [[ ! -f "$APP/vendor/autoload.php" ]]; then
   [[ -f "$OLD/vendor/autoload.php" && -f "$OLD/composer.lock" ]] || fail "vendor o composer.lock de Tito POS ausentes; instalar dependencias por separado"
   cmp -s "$OLD/composer.lock" "$REPO/backend/composer.lock" || fail "composer.lock original no coincide; instalar dependencias por separado"
   cp -a "$OLD/vendor" "$APP/"
+  install -m 600 "$REPO/backend/composer.lock" "$APP/composer.lock"
+  install -m 600 "$REPO/backend/composer.json" "$APP/composer.json"
 else
   [[ -f "$APP/composer.lock" ]] && cmp -s "$APP/composer.lock" "$REPO/backend/composer.lock" || fail "dependencias cambiaron; revisar Composer antes de publicar"
 fi

@@ -62,6 +62,10 @@ function registerUserAndSaleDetailRoutes(RouteCollectorProxy $group): void {
             $st->execute([$id,$biz]);$target=$st->fetch();
             if (!$target)fail('Usuario no encontrado.',404);
             $newRole=$b['role']??$target['role'];
+            if($newRole==='admin'&&$target['role']!=='admin'){
+                $st=$db->prepare('SELECT role_id FROM access_user_roles WHERE user_id=?');$st->execute([$id]);
+                if($st->fetchColumn())fail('Retira el rol personalizado antes de promover el usuario a administrador.',409);
+            }
             $newActive=array_key_exists('is_active',$b)?(int)$b['is_active']:(int)$target['is_active'];
             if ($id===(int)$admin['id'] && ($newRole!=='admin'||!$newActive))fail('No puedes quitarte tus propios permisos.',409);
             if ($target['role']==='admin' && (int)$target['is_active']===1 && ($newRole!=='admin'||!$newActive)) {

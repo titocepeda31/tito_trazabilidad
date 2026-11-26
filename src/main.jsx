@@ -15,6 +15,8 @@ import WarehousesPanel from './WarehousesPanel.jsx';
 import AccountPanel from './AccountPanel.jsx';
 import OrganizationPanel from './OrganizationPanel.jsx';
 import PlatformPanel from './PlatformPanel.jsx';
+import RolesPanel from './RolesPanel.jsx';
+import RestrictedWorkspace from './RestrictedWorkspace.jsx';
 import RemoteApprovalsPanel from './RemoteApprovalsPanel.jsx';
 import {installOneSignalDevVerification} from './onesignalVerify.js';
 import useCashierApprovalQueue from './useCashierApprovalQueue.js';
@@ -50,6 +52,7 @@ const menu = [
   { key: 'aprobaciones', label: 'Autorizaciones', ico: '✓' },
   { key: 'organizacion', label: 'Empresas y sucursales', ico: '▦' },
   { key: 'usuarios', label: 'Usuarios', ico: '♙' },
+  { key: 'roles', label: 'Roles y permisos', ico: '⚿' },
   { key: 'cuenta', label: 'Mi cuenta', ico: '♙' }
 ];
 
@@ -126,11 +129,11 @@ function App() {
     } catch (e) { setServerOk(false); notify(e.message, 'error'); }
     finally { setLoading(false); }
   }
-  useEffect(() => { if (token) refresh(false); }, [token]);
+  useEffect(() => { if (token&&!user?.custom_role) refresh(false); }, [token,user?.custom_role?.id]);
   // Se comprueba otra vez al entrar a Vender o Rendición para detectar
   // revocaciones, vencimientos y cambios de navegador sin mostrar Local 1.
   useEffect(()=>{
-    if(!token){setTerminalStatus(null);setTerminalChecking(false);return;}
+    if(!token||user?.custom_role){setTerminalStatus(null);setTerminalChecking(false);return;}
     // Mantener el panel de venta montado en segundo plano para no perder
     // colas de autorizaciones y reintentos cuando se navega a otras secciones.
     if(page!=='vender' && page!=='caja' && terminalVerified(terminalStatus))return;
@@ -149,7 +152,7 @@ function App() {
   // Revalidar gaveta del cajero al entrar a Vender/Rendición, sin dar
   // por confirmado ningún fondo de efectivo antes de consultar al servidor.
   useEffect(()=>{
-    if(!token||!terminalVerified(terminalStatus)){
+    if(!token||user?.custom_role||!terminalVerified(terminalStatus)){
       setCashStatus(null);setCashStatusError('');setCashChecking(false);return;
     }
     let alive=true;
@@ -163,7 +166,7 @@ function App() {
   },[token,terminalVersion,page==='vender',page==='caja',terminalStatus?.terminal?.id]);
 
   useEffect(()=>{
-    if(!token){setStaffPermissions({can_approve_discounts:false,can_sell_credit:false});return;}
+    if(!token||user?.custom_role){setStaffPermissions({can_approve_discounts:false,can_sell_credit:false});return;}
     let alive=true;
     api('/account/staff-permissions',{token}).then(data=>{
       if(alive)setStaffPermissions({can_approve_discounts:data.can_approve_discounts===true,can_sell_credit:data.can_sell_credit===true});
@@ -256,7 +259,7 @@ function App() {
   const pendingApprovals=approvalRequests.filter(r=>r.status==='pending').length;
   const canApproveDiscounts=isAdmin||staffPermissions.can_approve_discounts;
   const canSellCredit=isAdmin||staffPermissions.can_sell_credit;
-  const visibleMenu = isAdmin ? menu : menu.filter(m => !['importar','usuarios','recepciones','cotizaciones','bodegas','devoluciones','clientes','organizacion'].includes(m.key) && (m.key!=='aprobaciones'||canApproveDiscounts));
+  const visibleMenu = isAdmin ? menu : menu.filter(m => !['importar','usuarios','recepciones','cotizaciones','bodegas','devoluciones','clientes','organizacion','roles'].includes(m.key) && (m.key!=='aprobaciones'||canApproveDiscounts));
   const critical = products.filter(p => Number(p.stock_qty) <= 5);
   const stockValue = products.reduce((total,p) => total + Number(p.stock_qty) * Number(p.price_clp), 0);
   const dateCL = d => d.toLocaleDateString('sv-SE', {timeZone:'America/Santiago'});
@@ -266,6 +269,7 @@ function App() {
     const date = new Date(utc);
     return Number.isFinite(date.valueOf()) && dateCL(date) === today;
   });
+  if(token&&user?.custom_role)return <RestrictedWorkspace user={user} request={request} onLogout={logout}/>;
   return <>
     {!token ? <div className="auth-layout"><section className="auth-card">
       <div className="mark">T</div><div className="eyebrow">TITO LABS · SISTEMA COMERCIAL</div>
@@ -316,6 +320,7 @@ function App() {
         <div style={{display:page==='vender'&&salesScreenReady?'contents':'none'}}>{terminalCanSell&&cashCanSell&&<SellPanel key={'terminal-'+terminalVersion+'-'+terminalStatus.terminal.id+'-'+cashStatus.session.id} products={products} request={request} refresh={()=>refresh(false)} notify={notify} canDiscount={isAdmin} canApproveDiscount={canApproveDiscounts} canRegisterCredit={canSellCredit} isAdmin={isAdmin} terminalStatus={terminalStatus} cashStatus={cashStatus} onCashChanged={async()=>{try{setCashStatus(await api('/cash/current',{token}));}catch{setCashStatus(null);}}} onOpenCash={()=>setPage('caja')} onShowSales={()=>setPage('ventas')} businessName={user?.business_name||'Tito POS'} active={page==='vender'} newSaleRequest={newSaleRequest} />}</div>
         {page==='organizacion' && isAdmin && <OrganizationPanel request={request} notify={notify} />}
         {page==='usuarios' && isAdmin && <UsersPanel request={request} notify={notify} ownId={Number(user?.id)} />}
+        {page==='roles' && isAdmin && <RolesPanel request={request} />}
         {page==='cuenta' && <AccountPanel user={user} request={request} notify={notify} onPasswordChanged={()=>{endSession();setPage('inicio');notify('Contraseña actualizada. Inicia sesión nuevamente.','success');}} />}
         {page==='ventas' && <SalesPanel sales={sales} onRefresh={()=>refresh(true)} request={request} notify={notify} canVoid={isAdmin} onStartReturn={id=>{setReturnSaleId(id);setPage('devoluciones');}} businessName={user?.business_name||'Tito POS'} />}
         {page==='devoluciones' && isAdmin && <ReturnsPanel sales={sales} request={request} notify={notify} initialSaleId={returnSaleId} onChange={()=>refresh(false)} />}

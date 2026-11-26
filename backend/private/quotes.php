@@ -8,13 +8,13 @@ use Slim\Routing\RouteCollectorProxy;
 /** Cotizaciones internas no tributarias. Acceso administrador en MVP. */
 function registerQuoteRoutes(RouteCollectorProxy $group): void {
     $group->get('/quotes',static function(Request $request,Response $response): Response {
-        $admin=adminOnly($request);
+        $admin=accessRequire($request,'quotes.view');
         $st=db()->prepare('SELECT id,customer_name,customer_contact,valid_until,status,total_clp,created_at,converted_sale_id FROM quotes WHERE business_id=? ORDER BY id DESC LIMIT 100');
         $st->execute([(int)$admin['business_id']]);
         return respond($response,['quotes'=>$st->fetchAll()]);
     });
     $group->get('/quotes/{id:[0-9]+}',static function(Request $request,Response $response,array $args): Response {
-        $admin=adminOnly($request);$biz=(int)$admin['business_id'];$id=(int)$args['id'];
+        $admin=accessRequire($request,'quotes.view');$biz=(int)$admin['business_id'];$id=(int)$args['id'];
         $st=db()->prepare('SELECT q.id,q.customer_name,q.customer_contact,q.notes,q.valid_until,q.status,q.total_clp,q.created_at,q.converted_sale_id,u.email AS created_by_email FROM quotes q JOIN users u ON u.id=q.created_by WHERE q.business_id=? AND q.id=? LIMIT 1');
         $st->execute([$biz,$id]);$quote=$st->fetch();
         if(!$quote)fail('Cotización no encontrada.',404);

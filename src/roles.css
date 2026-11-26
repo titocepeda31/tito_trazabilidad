@@ -1,0 +1,2 @@
+.role-error{background:#fff1f1;color:#9b2020;border:1px solid #e7a4a4;padding:14px;border-radius:9px;margin:12px 0}
+.role-field-error{color:#b42318}.role-form input[aria-invalid=true]{border-color:#d92d20}.role-matrix{overflow-x:auto}.role-matrix input[type=checkbox],.role-check input[type=checkbox]{width:18px;height:18px;min-height:18px;accent-color:#079d76}.role-check{display:flex;align-items:center;gap:10px}.role-nav{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px}.role-workspace{min-height:100vh}

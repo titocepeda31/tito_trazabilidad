@@ -6,6 +6,7 @@ const localDate=()=>new Date().toLocaleDateString('sv-SE',{timeZone:'America/San
 
 export default function ReceiptsPanel({products,request,onChange,notify}){
   const [supplier,setSupplier]=useState('');
+  const [suppliers,setSuppliers]=useState([]),[supplierError,setSupplierError]=useState(''),[costSupplier,setCostSupplier]=useState(''),[costProduct,setCostProduct]=useState(''),[costs,setCosts]=useState(null),[costError,setCostError]=useState(''),[costBusy,setCostBusy]=useState(false);
   const [docType,setDocType]=useState('sin_documento');
   const [docNumber,setDocNumber]=useState('');
   const [date,setDate]=useState(localDate);
@@ -30,7 +31,12 @@ export default function ReceiptsPanel({products,request,onChange,notify}){
     catch(error){notify(error.message,'error');}
     finally{setLoading(false);}
   }
-  useEffect(()=>{load();},[]);
+  async function loadSuppliers(){setSupplierError('');try{const d=await request('/receipts/suppliers');setSuppliers(d.suppliers||[]);}catch(e){setSupplierError(e.message);}}
+  useEffect(()=>{load();void loadSuppliers();},[]);
+  async function loadCosts(e){e.preventDefault();if(costBusy||!costSupplier)return;setCostBusy(true);setCostError('');setCosts(null);
+    try{const d=await request('/receipts/supplier-costs?supplier_id='+encodeURIComponent(costSupplier)+(costProduct?'&product_id='+encodeURIComponent(costProduct):''));setCosts(d.costs||[]);}
+    catch(e){setCostError(e.message);}finally{setCostBusy(false);}}
+
 
   function add(p){
     if(locked)return;
@@ -80,8 +86,8 @@ export default function ReceiptsPanel({products,request,onChange,notify}){
     e.preventDefault();
     if(locked)return;
     if(!lines.length){notify('Agrega al menos un producto.','error');return;}
-    const s=supplier.trim();
-    if(!s){notify('Ingresa un proveedor.','error');return;}
+    const s=Number(supplier);
+    if(!s||!suppliers.some(p=>Number(p.id)===s)){setSupplierError('Selecciona un proveedor activo del catálogo.');return;}
     const doc=docNumber.trim();
     if(docType==='sin_documento'&&doc){notify('Selecciona un tipo de documento.','error');return;}
     if(docType!=='sin_documento'&&!doc){notify('Indica el número de documento.','error');return;}
@@ -101,7 +107,7 @@ export default function ReceiptsPanel({products,request,onChange,notify}){
         quantity:qty,unit_cost_clp:cost
       });
     }
-    const body={request_id:newId(),supplier_name:s,document_type:docType,document_number:doc||null,received_at:date,items};
+    const body={request_id:newId(),supplier_id:s,document_type:docType,document_number:doc||null,received_at:date,items};
     sessionStorage.setItem(storageKey,JSON.stringify(body));
     setPending(body);
     send(body);
@@ -125,7 +131,8 @@ export default function ReceiptsPanel({products,request,onChange,notify}){
       {pending&&<div className="receipt-alert"><strong>Recepción pendiente de confirmación</strong><p>No crees otra recepción hasta verificar el resultado en el historial. Puedes reintentar con el mismo identificador; el servidor evita duplicar el stock.</p><div className="receipt-buttons"><button className="primary" disabled={busy} type="button" onClick={()=>send(pending)}>{busy?'Verificando…':'Reintentar mismo registro'}</button><button className="ghost" disabled={busy} onClick={discard}>Descartar tras verificar</button></div></div>}
       <form className="formstack" onSubmit={submit}>
         <div className="receipt-fields">
-          <label>Proveedor<input required value={supplier} maxLength={150} disabled={locked} onChange={e=>setSupplier(e.target.value)} placeholder="Ej. Distribuidora Central"/></label>
+          <label>Proveedor<select required value={supplier} disabled={locked} aria-invalid={Boolean(supplierError)} onChange={e=>{setSupplier(e.target.value);setSupplierError('');}}><option value="">Seleccionar proveedor</option>{suppliers.map(s=><option key={s.id} value={s.id}>{s.name}{s.tax_id?' · '+s.tax_id:''}</option>)}</select>{supplierError&&<small className="role-field-error" role="alert">{supplierError}</small>}</label>
+          {!suppliers.length&&<p className="helper">Crea un proveedor activo en Fabricantes y proveedores. <button type="button" className="ghost mini" onClick={loadSuppliers} disabled={locked}>Actualizar proveedores</button></p>}
           <label>Fecha de recepción<input type="date" required value={date} disabled={locked} onChange={e=>setDate(e.target.value)}/></label>
           <label>Documento<select value={docType} disabled={locked} onChange={e=>{setDocType(e.target.value);setDocNumber('');}}><option value="sin_documento">Sin documento</option><option value="factura">Factura</option><option value="guia">Guía de despacho</option><option value="boleta">Boleta</option></select></label>
           {docType!=='sin_documento'&&<label>Número de documento<input required maxLength={80} value={docNumber} disabled={locked} onChange={e=>setDocNumber(e.target.value)} placeholder="Ej. 15234"/></label>}
@@ -156,7 +163,12 @@ export default function ReceiptsPanel({products,request,onChange,notify}){
       </form>
     </section>
     <section className="panel"><div className="panel-heading pad"><div><h3>Últimas recepciones</h3><p>Historial de ingresos realizados.</p></div><button className="ghost" onClick={load} disabled={loading}>↻ Actualizar</button></div>
-      <div className="table-wrap"><table><thead><tr><th>#</th><th>Fecha recepción</th><th>Proveedor</th><th>Documento</th><th>Productos</th><th>Costo total</th><th></th></tr></thead><tbody>{receipts.map(r=><tr key={r.id}><td><strong>#{r.id}</strong></td><td>{r.received_at}</td><td>{r.supplier_name}</td><td>{r.document_type==='sin_documento'?'Sin documento':r.document_type+' '+(r.document_number||'')}</td><td>{r.item_count}</td><td><strong>{pesos(r.total_cost_clp)}</strong></td><td><button type="button" className="ghost mini" disabled={busy} onClick={()=>view(r.id)}>Ver</button></td></tr>)}</tbody></table>{!loading&&!receipts.length&&<p className="muted receipt-no-data">No hay recepciones registradas.</p>}</div>
+      <div className="table-wrap"><table><thead><tr><th>#</th><th>Fecha recepción</th><th>Proveedor</th><th>Documento</th><th>Productos</th><th>Costo total</th><th></th></tr></thead><tbody>{receipts.map(r=><tr key={r.id}><td><strong>#{r.id}</strong></td><td>{r.received_at}</td><td>{r.supplier_name}<small className="sub">{r.supplier_id?'Proveedor vinculado':'Registro heredado'}</small></td><td>{r.document_type==='sin_documento'?'Sin documento':r.document_type+' '+(r.document_number||'')}</td><td>{r.item_count}</td><td><strong>{pesos(r.total_cost_clp)}</strong></td><td><button type="button" className="ghost mini" disabled={busy} onClick={()=>view(r.id)}>Ver</button></td></tr>)}</tbody></table>{!loading&&!receipts.length&&<p className="muted receipt-no-data">No hay recepciones registradas.</p>}</div>
+    </section>
+    <section className="panel pad"><h3>Historial de costos por proveedor</h3><p className="muted">Compras confirmadas con proveedor identificado; los costos provienen de las líneas originales de recepción (CLP).</p>
+      <form className="formstack" onSubmit={loadCosts}><label>Proveedor<select value={costSupplier} disabled={costBusy} onChange={e=>{setCostSupplier(e.target.value);setCosts(null);}}><option value="">Seleccionar</option>{suppliers.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></label><label>Producto (opcional)<select value={costProduct} disabled={costBusy} onChange={e=>{setCostProduct(e.target.value);setCosts(null);}}><option value="">Todos los productos</option>{products.map(p=><option key={p.id} value={p.id}>{p.name} · {p.sku||'Sin SKU'}</option>)}</select></label><button className="ghost" disabled={costBusy||!costSupplier}>{costBusy?'Consultando…':'Consultar costos'}</button></form>
+      {costError&&<p className="role-error" role="alert">{costError}</p>}
+      {costs&&<div className="table-wrap"><table><thead><tr><th>Fecha</th><th>Recepción</th><th>Producto</th><th>Cantidad</th><th>Costo unitario</th><th>Total</th></tr></thead><tbody>{costs.map(c=><tr key={c.line_id}><td>{c.received_at}</td><td>#{c.receipt_id}</td><td>{c.product_name_snapshot}</td><td>{qtyFormat(c.quantity)}</td><td>{pesos(c.unit_cost_clp)}</td><td>{pesos(c.line_total_clp)}</td></tr>)}</tbody></table>{!costs.length&&<p className="muted">No hay compras vinculadas para este filtro.</p>}</div>}
     </section>
     {showNew&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setShowNew(false);}}><div className="modal" role="dialog" aria-modal="true" aria-label="Agregar producto nuevo"><div className="modal-head"><h3>Nuevo producto para esta recepción</h3><button type="button" className="ghost close" onClick={()=>setShowNew(false)} aria-label="Cerrar">×</button></div>
       <form className="formstack" onSubmit={addNew}>
@@ -168,7 +180,7 @@ export default function ReceiptsPanel({products,request,onChange,notify}){
       </form>
     </div></div>}
     {selected&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setSelected(null);}}><div className="modal" role="dialog" aria-modal="true" aria-label="Detalle de recepción"><div className="modal-head"><h3>Recepción #{selected.receipt.id}</h3><button type="button" className="ghost close" onClick={()=>setSelected(null)} aria-label="Cerrar">×</button></div>
-      <div className="receipt-detail-meta"><p><strong>Proveedor:</strong> {selected.receipt.supplier_name}</p><p><strong>Fecha:</strong> {selected.receipt.received_at}</p><p><strong>Documento:</strong> {selected.receipt.document_type==='sin_documento'?'Sin documento':selected.receipt.document_type+' '+selected.receipt.document_number}</p><p><strong>Registró:</strong> {selected.receipt.entered_by_email}</p></div>
+      <div className="receipt-detail-meta"><p><strong>Proveedor:</strong> {selected.receipt.supplier_name}{selected.receipt.supplier_tax_id?' · '+selected.receipt.supplier_tax_id:''} <small>({selected.receipt.supplier_id?'Vinculado':'Registro heredado'})</small></p><p><strong>Fecha:</strong> {selected.receipt.received_at}</p><p><strong>Documento:</strong> {selected.receipt.document_type==='sin_documento'?'Sin documento':selected.receipt.document_type+' '+selected.receipt.document_number}</p><p><strong>Registró:</strong> {selected.receipt.entered_by_email}</p></div>
       <div className="table-wrap"><table><thead><tr><th>Producto</th><th>Cantidad</th><th>Costo</th><th>Stock antes</th><th>Stock después</th></tr></thead><tbody>{selected.items.map(i=><tr key={i.id}><td><strong>{i.product_name_snapshot}</strong><small className="sub">{i.sku||''}</small></td><td>{qtyFormat(i.quantity)}</td><td>{pesos(i.unit_cost_clp)}</td><td>{qtyFormat(i.stock_before)}</td><td>{qtyFormat(i.stock_after)}</td></tr>)}</tbody></table></div>
       <div className="receipt-total"><span>Total registrado</span><strong>{pesos(selected.receipt.total_cost_clp)}</strong></div>
     </div></div>}

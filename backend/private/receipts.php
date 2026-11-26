@@ -5,20 +5,48 @@ use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 use Slim\Routing\RouteCollectorProxy;
 
+function receiptSupplierReady(PDO $db): void {
+    $s=$db->query("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='receipt_supplier_snapshots'");
+    if((int)$s->fetchColumn()!==1)fail('Falta instalar la migración 008 de proveedores en recepciones.',503);
+}
+function receiptSupplierAssociate(PDO $db,int $biz,int $pid,?int $sid): void {
+    if($sid===null)return;
+    // El producto y proveedor ya se verificaron en esta transacción y empresa.
+    $s=$db->prepare('INSERT INTO product_suppliers(product_id,business_id,supplier_id) VALUES(?,?,?) ON DUPLICATE KEY UPDATE supplier_id=VALUES(supplier_id)');
+    $s->execute([$pid,$biz,$sid]);
+}
 /** Recepciones de mercadería: solo administradores. Nunca cambia el precio de venta. */
 function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
+    $group->get('/receipts/suppliers',static function(Request $request, Response $response): Response {
+        $u=adminOnly($request);$db=db();receiptSupplierReady($db);
+        $s=$db->prepare('SELECT id,name,tax_country,tax_id FROM suppliers WHERE business_id=? AND is_active=1 ORDER BY name,id');$s->execute([(int)$u['business_id']]);
+        return respond($response,['suppliers'=>$s->fetchAll()]);
+    });
+    $group->get('/receipts/supplier-costs',static function(Request $request, Response $response): Response {
+        $u=adminOnly($request);$db=db();receiptSupplierReady($db);$biz=(int)$u['business_id'];
+        $q=$request->getQueryParams();
+        $sid=filter_var($q['supplier_id']??null,FILTER_VALIDATE_INT,['options'=>['min_range'=>1]]);
+        $pid=isset($q['product_id'])&&$q['product_id']!==''?filter_var($q['product_id'],FILTER_VALIDATE_INT,['options'=>['min_range'=>1]]):null;
+        if($sid===false||$pid===false||array_diff(array_keys($q),['supplier_id','product_id']))fail('Filtros de costo inválidos.',422);
+        $s=$db->prepare('SELECT id FROM suppliers WHERE business_id=? AND id=?');$s->execute([$biz,$sid]);if(!$s->fetchColumn())fail('Proveedor no encontrado.',404);
+        if($pid!==null){$s=$db->prepare('SELECT id FROM products WHERE business_id=? AND id=?');$s->execute([$biz,$pid]);if(!$s->fetchColumn())fail('Producto no encontrado.',404);}
+        $sql='SELECT r.id AS receipt_id,r.received_at,r.document_type,r.document_number,h.supplier_name,i.id AS line_id,i.product_id,i.product_name_snapshot,p.sku,i.quantity,i.unit_cost_clp,i.line_total_clp FROM receipt_supplier_snapshots h JOIN goods_receipts r ON r.id=h.receipt_id AND r.business_id=h.business_id JOIN goods_receipt_items i ON i.receipt_id=r.id JOIN products p ON p.id=i.product_id AND p.business_id=r.business_id WHERE h.business_id=? AND h.supplier_id=?';
+        $params=[$biz,$sid];if($pid!==null){$sql.=' AND i.product_id=?';$params[]=$pid;}
+        $s=$db->prepare($sql.' ORDER BY r.received_at DESC,r.id DESC,i.id DESC LIMIT 100');$s->execute($params);
+        return respond($response,['costs'=>$s->fetchAll()]);
+    });
     $group->get('/receipts',static function(Request $request, Response $response): Response {
         $admin=adminOnly($request);
-        $db=db();
-        $st=$db->prepare('SELECT r.id,r.supplier_name,r.document_type,r.document_number,r.received_at,r.total_cost_clp,r.created_at,r.entered_by,u.email AS entered_by_email,(SELECT COUNT(*) FROM goods_receipt_items i WHERE i.receipt_id=r.id) AS item_count FROM goods_receipts r JOIN users u ON u.id=r.entered_by WHERE r.business_id=? ORDER BY r.id DESC LIMIT 100');
+        $db=db();receiptSupplierReady($db);
+        $st=$db->prepare('SELECT r.id,r.supplier_name,h.supplier_id,h.tax_id AS supplier_tax_id,h.tax_country AS supplier_tax_country,r.document_type,r.document_number,r.received_at,r.total_cost_clp,r.created_at,r.entered_by,u.email AS entered_by_email,(SELECT COUNT(*) FROM goods_receipt_items i WHERE i.receipt_id=r.id) AS item_count FROM goods_receipts r JOIN users u ON u.id=r.entered_by LEFT JOIN receipt_supplier_snapshots h ON h.receipt_id=r.id AND h.business_id=r.business_id WHERE r.business_id=? ORDER BY r.id DESC LIMIT 100');
         $st->execute([(int)$admin['business_id']]);
         return respond($response,['receipts'=>$st->fetchAll()]);
     });
 
     $group->get('/receipts/{id:[0-9]+}',static function(Request $request, Response $response,array $args): Response {
         $admin=adminOnly($request);
-        $db=db();$biz=(int)$admin['business_id'];$id=(int)$args['id'];
-        $st=$db->prepare('SELECT r.id,r.supplier_name,r.document_type,r.document_number,r.received_at,r.total_cost_clp,r.created_at,r.entered_by,u.email AS entered_by_email FROM goods_receipts r JOIN users u ON u.id=r.entered_by WHERE r.id=? AND r.business_id=?');
+        $db=db();receiptSupplierReady($db);$biz=(int)$admin['business_id'];$id=(int)$args['id'];
+        $st=$db->prepare('SELECT r.id,r.supplier_name,h.supplier_id,h.tax_id AS supplier_tax_id,h.tax_country AS supplier_tax_country,r.document_type,r.document_number,r.received_at,r.total_cost_clp,r.created_at,r.entered_by,u.email AS entered_by_email FROM goods_receipts r JOIN users u ON u.id=r.entered_by LEFT JOIN receipt_supplier_snapshots h ON h.receipt_id=r.id AND h.business_id=r.business_id WHERE r.id=? AND r.business_id=?');
         $st->execute([$id,$biz]);$receipt=$st->fetch();$st->closeCursor();
         if(!$receipt)fail('Recepción no encontrada.',404);
         $st=$db->prepare('SELECT i.id,i.product_id,i.product_name_snapshot,i.quantity,i.unit_cost_clp,i.line_total_clp,i.stock_before,i.stock_after,p.sku FROM goods_receipt_items i JOIN products p ON p.id=i.product_id WHERE i.receipt_id=? AND p.business_id=? ORDER BY i.id');
@@ -29,11 +57,16 @@ function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
     $group->post('/receipts',static function(Request $request, Response $response): Response {
         $admin=adminOnly($request);
         $db=db();$biz=(int)$admin['business_id'];$uid=(int)$admin['id'];
-        $b=requestBody($request);
-        foreach(array_keys($b) as $key){if(!in_array($key,['request_id','supplier_name','document_type','document_number','received_at','items'],true))fail('Campo desconocido: '.$key,422);}
+        receiptSupplierReady($db);$b=requestBody($request);
+        foreach(array_keys($b) as $key){if(!in_array($key,['request_id','supplier_id','supplier_name','document_type','document_number','received_at','items'],true))fail('Campo desconocido: '.$key,422);}
         $rid=$b['request_id']??null;
         if(!is_string($rid)||!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i',$rid))fail('Identificador de recepción inválido.',422);
-        $supplier=requireString($b,'supplier_name',150);
+        // ID para nuevas recepciones. Conserva el protocolo de intentos heredados pendientes.
+        $supplierId=array_key_exists('supplier_id',$b)?originId($b['supplier_id'],'supplier_id'):null;
+        if(array_key_exists('supplier_id',$b)&&$supplierId===null)throw new HttpError('Selecciona un proveedor.',422,'supplier_id');
+        if($supplierId!==null&&array_key_exists('supplier_name',$b))fail('Usa el identificador de proveedor o el nombre heredado, no ambos.',422);
+        $supplier=$supplierId===null?requireString($b,'supplier_name',150):'';
+
         $dtype=$b['document_type']??'sin_documento';
         if(!in_array($dtype,['factura','guia','boleta','sin_documento'],true))fail('Tipo de documento inválido.',422);
         $doc=$b['document_number']??null;
@@ -90,13 +123,25 @@ function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
         }
         ksort($specs,SORT_NUMERIC);
         $canonical=['supplier_name'=>$supplier,'document_type'=>$dtype,'document_number'=>$doc,'received_at'=>$date,'existing_items'=>$specs,'new_items'=>$newSpecs];
+        if($supplierId!==null){unset($canonical['supplier_name']);$canonical=['supplier_id'=>$supplierId]+$canonical;}
         $hash=hash('sha256',json_encode($canonical,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
         try{
             $db->beginTransaction();
+            originLockCompany($db,$biz);
+            // Reintento confirmado antes de validar proveedor activo o precios actuales.
+            $st=$db->prepare('SELECT id,payload_hash,total_cost_clp FROM goods_receipts WHERE business_id=? AND request_id=? FOR UPDATE');
+            $st->execute([$biz,strtolower($rid)]);$prior=$st->fetch();$st->closeCursor();
+            if($prior){
+                if(!hash_equals((string)$prior['payload_hash'],$hash))fail('El identificador ya fue utilizado con datos diferentes.',409);
+                $db->commit();return respond($response,['ok'=>true,'receipt_id'=>(int)$prior['id'],'total_cost_clp'=>(int)$prior['total_cost_clp'],'already_recorded'=>true]);
+            }
+            $supplierRow=null;
+            if($supplierId!==null){$supplierRow=originRow($db,'suppliers',$biz,$supplierId,'supplier_id');$supplier=$supplierRow['name'];}
             titoProductCreationActor($db,$biz,$uid,'mercaderia');
             $st=$db->prepare('INSERT INTO goods_receipts(business_id,entered_by,request_id,payload_hash,supplier_name,document_type,document_number,received_at,total_cost_clp) VALUES(?,?,?,?,?,?,?,?,0)');
             $st->execute([$biz,$uid,strtolower($rid),$hash,$supplier,$dtype,$doc,$date]);
             $receiptId=(int)$db->lastInsertId();
+            if($supplierRow){$st=$db->prepare('INSERT INTO receipt_supplier_snapshots(receipt_id,business_id,supplier_id,supplier_name,tax_country,tax_id) VALUES(?,?,?,?,?,?)');$st->execute([$receiptId,$biz,$supplierId,$supplier,$supplierRow['tax_country'],$supplierRow['tax_id']]);}
             $lock=$db->prepare('SELECT id,name,stock_qty,sale_unit FROM products WHERE id=? AND business_id=? AND is_active=1 FOR UPDATE');
             $upd=$db->prepare('UPDATE products SET stock_qty=? WHERE id=? AND business_id=?');
             $insert=$db->prepare('INSERT INTO goods_receipt_items(receipt_id,product_id,product_name_snapshot,quantity,unit_cost_clp,line_total_clp,stock_before,stock_after) VALUES(?,?,?,?,?,?,?,?)');
@@ -116,6 +161,7 @@ function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
                 if($total>1000000000000)fail('Recepción demasiado grande.',422);
                 $upd->execute([$balance,$pid,$biz]);
                 $insert->execute([$receiptId,$pid,$product['name'],$qty,$spec['unit_cost_clp'],$line,$previous,$balance]);
+                receiptSupplierAssociate($db,$biz,$pid,$supplierId);
                 move($db,$biz,$pid,null,$uid,'receipt',$qty,$balance,mb_substr('Recepción #'.$receiptId.' · '.$supplier,0,250));
             }
             // Products created from the reception start at zero and get stock
@@ -149,6 +195,7 @@ function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
                 if($total>1000000000000)fail('Recepción demasiado grande.',422);
                 $upd->execute([$balance,$newId,$biz]);
                 $insert->execute([$receiptId,$newId,$np['name'],$qty,$spec['unit_cost_clp'],$line,'0.000',$balance]);
+                receiptSupplierAssociate($db,$biz,$newId,$supplierId);
                 move($db,$biz,$newId,null,$uid,'receipt',$qty,$balance,mb_substr('Recepción #'.$receiptId.' · '.$supplier,0,250));
                 $newProductIds[]=$newId;
             }

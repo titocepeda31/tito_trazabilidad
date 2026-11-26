@@ -113,13 +113,23 @@ function titoSaleHistoricalLocation(PDO $db,int $biz,int $saleId): int {
  * Debe invocarse DENTRO de la transacción del movimiento; no crea un traslado comercial.
  */
 function titoApplyLocationStock(PDO $db,int $biz,int $pid,int $warehouseId,float $delta): string {
+    return titoApplyLocationStockCore($db,$biz,$pid,$warehouseId,$delta,false);
+}
+/** Solo para recepción: quien llama debe insertar las unidades y conciliar en la misma transacción. */
+function titoReceiveLocationStock(PDO $db,int $biz,int $pid,int $warehouseId,float $quantity,bool $serialReceipt): string {
+    if($quantity<=0)fail('Cantidad recibida inválida.',422);
+    return titoApplyLocationStockCore($db,$biz,$pid,$warehouseId,$quantity,$serialReceipt);
+}
+function titoApplyLocationStockCore(PDO $db,int $biz,int $pid,int $warehouseId,float $delta,bool $serialReceipt): string {
     if(!$db->inTransaction())throw new RuntimeException('Se requiere transacción de inventario.');
     if(!is_finite($delta)||abs($delta)<0.0005||abs($delta)>1000000000
         ||abs($delta*1000-round($delta*1000))>0.00001)fail('Variación de stock inválida.',422);
     $p=$db->prepare('SELECT stock_qty FROM products WHERE id=? AND business_id=? FOR UPDATE');
     $p->execute([$pid,$biz]);$global=$p->fetchColumn();$p->closeCursor();
     if($global===false)fail('Producto ajeno a la empresa o inexistente.',404);
-    serialRejectLegacy($db,$biz,$pid);
+    if($serialReceipt){
+        if($delta<=0||!serialControlled($db,$biz,$pid))fail('Recepción serializada inválida.',409);
+    }else serialRejectLegacy($db,$biz,$pid);
     $st=$db->prepare('SELECT ws.warehouse_id,ws.qty,w.code,w.business_id FROM warehouse_stocks ws JOIN warehouses w ON w.id=ws.warehouse_id AND w.business_id=ws.business_id WHERE ws.product_id=? AND ws.business_id=? ORDER BY ws.warehouse_id FOR UPDATE');
     $st->execute([$pid,$biz]);$rows=$st->fetchAll();$st->closeCursor();
     $balances=[];$localId=null;$sum=0.0;
@@ -154,6 +164,10 @@ function titoApplyLocationStock(PDO $db,int $biz,int $pid,int $warehouseId,float
     if(abs($sumAfter-$result)>0.0005||abs(($actual[$warehouseId]??-1)-$resultLocation)>0.0005
        ||abs(($actual[$localId]??-1)-($balances[$localId]+($warehouseId===$localId?$delta:0)))>0.0005)
         throw new RuntimeException('Fallo de conciliación del stock por sucursal.');
+    if(array_diff_key($balances,$actual)||array_diff_key($actual,$balances))throw new RuntimeException('Cambió el conjunto de ubicaciones durante la operación.');
+    foreach($balances as $wid=>$before){
+        if(abs($actual[$wid]-($before+($wid===$warehouseId?$delta:0)))>0.0005)throw new RuntimeException('Fallo de conciliación de una ubicación.');
+    }
     return $after;
 }
 

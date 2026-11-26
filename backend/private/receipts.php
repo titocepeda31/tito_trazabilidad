@@ -9,6 +9,10 @@ function receiptSupplierReady(PDO $db): void {
     $s=$db->query("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='receipt_supplier_snapshots'");
     if((int)$s->fetchColumn()!==1)fail('Falta instalar la migración 008 de proveedores en recepciones.',503);
 }
+function receiptWarehouseReady(PDO $db): void {
+    $s=$db->query("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='receipt_warehouse_snapshots'");
+    if((int)$s->fetchColumn()!==1)fail('Falta instalar la migración 010 de ubicación de recepción.',503);
+}
 function receiptSupplierAssociate(PDO $db,int $biz,int $pid,?int $sid): void {
     if($sid===null)return;
     // El producto y proveedor ya se verificaron en esta transacción y empresa.
@@ -37,16 +41,16 @@ function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
     });
     $group->get('/receipts',static function(Request $request, Response $response): Response {
         $admin=adminOnly($request);
-        $db=db();receiptSupplierReady($db);
-        $st=$db->prepare('SELECT r.id,r.supplier_name,h.supplier_id,h.tax_id AS supplier_tax_id,h.tax_country AS supplier_tax_country,r.document_type,r.document_number,r.received_at,r.total_cost_clp,r.created_at,r.entered_by,u.email AS entered_by_email,(SELECT COUNT(*) FROM goods_receipt_items i WHERE i.receipt_id=r.id) AS item_count FROM goods_receipts r JOIN users u ON u.id=r.entered_by LEFT JOIN receipt_supplier_snapshots h ON h.receipt_id=r.id AND h.business_id=r.business_id WHERE r.business_id=? ORDER BY r.id DESC LIMIT 100');
+        $db=db();receiptSupplierReady($db);receiptWarehouseReady($db);
+        $st=$db->prepare('SELECT r.id,r.supplier_name,h.supplier_id,h.tax_id AS supplier_tax_id,h.tax_country AS supplier_tax_country,loc.warehouse_id,loc.warehouse_name,loc.warehouse_code,r.document_type,r.document_number,r.received_at,r.total_cost_clp,r.created_at,r.entered_by,u.email AS entered_by_email,(SELECT COUNT(*) FROM goods_receipt_items i WHERE i.receipt_id=r.id) AS item_count FROM goods_receipts r JOIN users u ON u.id=r.entered_by LEFT JOIN receipt_supplier_snapshots h ON h.receipt_id=r.id AND h.business_id=r.business_id LEFT JOIN receipt_warehouse_snapshots loc ON loc.receipt_id=r.id AND loc.business_id=r.business_id WHERE r.business_id=? ORDER BY r.id DESC LIMIT 100');
         $st->execute([(int)$admin['business_id']]);
         return respond($response,['receipts'=>$st->fetchAll()]);
     });
 
     $group->get('/receipts/{id:[0-9]+}',static function(Request $request, Response $response,array $args): Response {
         $admin=adminOnly($request);
-        $db=db();receiptSupplierReady($db);$biz=(int)$admin['business_id'];$id=(int)$args['id'];
-        $st=$db->prepare('SELECT r.id,r.supplier_name,h.supplier_id,h.tax_id AS supplier_tax_id,h.tax_country AS supplier_tax_country,r.document_type,r.document_number,r.received_at,r.total_cost_clp,r.created_at,r.entered_by,u.email AS entered_by_email FROM goods_receipts r JOIN users u ON u.id=r.entered_by LEFT JOIN receipt_supplier_snapshots h ON h.receipt_id=r.id AND h.business_id=r.business_id WHERE r.id=? AND r.business_id=?');
+        $db=db();receiptSupplierReady($db);receiptWarehouseReady($db);$biz=(int)$admin['business_id'];$id=(int)$args['id'];
+        $st=$db->prepare('SELECT r.id,r.supplier_name,h.supplier_id,h.tax_id AS supplier_tax_id,h.tax_country AS supplier_tax_country,loc.warehouse_id,loc.warehouse_name,loc.warehouse_code,r.document_type,r.document_number,r.received_at,r.total_cost_clp,r.created_at,r.entered_by,u.email AS entered_by_email FROM goods_receipts r JOIN users u ON u.id=r.entered_by LEFT JOIN receipt_supplier_snapshots h ON h.receipt_id=r.id AND h.business_id=r.business_id LEFT JOIN receipt_warehouse_snapshots loc ON loc.receipt_id=r.id AND loc.business_id=r.business_id WHERE r.id=? AND r.business_id=?');
         $st->execute([$id,$biz]);$receipt=$st->fetch();$st->closeCursor();
         if(!$receipt)fail('Recepción no encontrada.',404);
         $st=$db->prepare('SELECT i.id,i.product_id,i.product_name_snapshot,i.quantity,i.unit_cost_clp,i.line_total_clp,i.stock_before,i.stock_after,p.sku FROM goods_receipt_items i JOIN products p ON p.id=i.product_id WHERE i.receipt_id=? AND p.business_id=? ORDER BY i.id');
@@ -58,8 +62,8 @@ function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
     $group->post('/receipts',static function(Request $request, Response $response): Response {
         $admin=adminOnly($request);
         $db=db();$biz=(int)$admin['business_id'];$uid=(int)$admin['id'];
-        receiptSupplierReady($db);$b=requestBody($request);
-        foreach(array_keys($b) as $key){if(!in_array($key,['request_id','supplier_id','supplier_name','document_type','document_number','received_at','items'],true))fail('Campo desconocido: '.$key,422);}
+        receiptSupplierReady($db);receiptWarehouseReady($db);$b=requestBody($request);
+        foreach(array_keys($b) as $key){if(!in_array($key,['request_id','supplier_id','supplier_name','warehouse_id','document_type','document_number','received_at','items'],true))fail('Campo desconocido: '.$key,422);}
         $rid=$b['request_id']??null;
         if(!is_string($rid)||!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i',$rid))fail('Identificador de recepción inválido.',422);
         // ID para nuevas recepciones. Conserva el protocolo de intentos heredados pendientes.
@@ -67,6 +71,8 @@ function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
         if(array_key_exists('supplier_id',$b)&&$supplierId===null)throw new HttpError('Selecciona un proveedor.',422,'supplier_id');
         if($supplierId!==null&&array_key_exists('supplier_name',$b))fail('Usa el identificador de proveedor o el nombre heredado, no ambos.',422);
         $supplier=$supplierId===null?requireString($b,'supplier_name',150):'';
+        $requestedWarehouse=array_key_exists('warehouse_id',$b)?originId($b['warehouse_id'],'warehouse_id'):null;
+        if(array_key_exists('warehouse_id',$b)&&$requestedWarehouse===null)throw new HttpError('Selecciona una bodega.',422,'warehouse_id');
 
         $dtype=$b['document_type']??'sin_documento';
         if(!in_array($dtype,['factura','guia','boleta','sin_documento'],true))fail('Tipo de documento inválido.',422);
@@ -127,6 +133,7 @@ function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
         ksort($specs,SORT_NUMERIC);
         $canonical=['supplier_name'=>$supplier,'document_type'=>$dtype,'document_number'=>$doc,'received_at'=>$date,'existing_items'=>$specs,'new_items'=>$newSpecs];
         if($supplierId!==null){unset($canonical['supplier_name']);$canonical=['supplier_id'=>$supplierId]+$canonical;}
+        if($requestedWarehouse!==null)$canonical['warehouse_id']=$requestedWarehouse;
         $hash=hash('sha256',json_encode($canonical,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
         try{
             $db->beginTransaction();
@@ -138,15 +145,18 @@ function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
                 if(!hash_equals((string)$prior['payload_hash'],$hash))fail('El identificador ya fue utilizado con datos diferentes.',409);
                 $db->commit();return respond($response,['ok'=>true,'receipt_id'=>(int)$prior['id'],'total_cost_clp'=>(int)$prior['total_cost_clp'],'already_recorded'=>true]);
             }
+            $warehouseId=$requestedWarehouse??titoLocalLocationId($db,$biz);
+            $s=$db->prepare('SELECT id,name,code FROM warehouses WHERE business_id=? AND id=? AND is_active=1 FOR UPDATE');$s->execute([$biz,$warehouseId]);$warehouse=$s->fetch();$s->closeCursor();
+            if(!$warehouse)throw new HttpError('Selecciona una bodega activa de tu empresa.',422,'warehouse_id');
             $supplierRow=null;
             if($supplierId!==null){$supplierRow=originRow($db,'suppliers',$biz,$supplierId,'supplier_id');$supplier=$supplierRow['name'];}
             titoProductCreationActor($db,$biz,$uid,'mercaderia');
             $st=$db->prepare('INSERT INTO goods_receipts(business_id,entered_by,request_id,payload_hash,supplier_name,document_type,document_number,received_at,total_cost_clp) VALUES(?,?,?,?,?,?,?,?,0)');
             $st->execute([$biz,$uid,strtolower($rid),$hash,$supplier,$dtype,$doc,$date]);
             $receiptId=(int)$db->lastInsertId();
+            $s=$db->prepare('INSERT INTO receipt_warehouse_snapshots(receipt_id,business_id,warehouse_id,warehouse_name,warehouse_code) VALUES(?,?,?,?,?)');$s->execute([$receiptId,$biz,$warehouseId,$warehouse['name'],$warehouse['code']]);
             if($supplierRow){$st=$db->prepare('INSERT INTO receipt_supplier_snapshots(receipt_id,business_id,supplier_id,supplier_name,tax_country,tax_id) VALUES(?,?,?,?,?,?)');$st->execute([$receiptId,$biz,$supplierId,$supplier,$supplierRow['tax_country'],$supplierRow['tax_id']]);}
             $lock=$db->prepare('SELECT id,name,stock_qty,sale_unit FROM products WHERE id=? AND business_id=? AND is_active=1 FOR UPDATE');
-            $upd=$db->prepare('UPDATE products SET stock_qty=? WHERE id=? AND business_id=?');
             $insert=$db->prepare('INSERT INTO goods_receipt_items(receipt_id,product_id,product_name_snapshot,quantity,unit_cost_clp,line_total_clp,stock_before,stock_after) VALUES(?,?,?,?,?,?,?,?)');
             $total=0;
             foreach($specs as $pid=>$spec){
@@ -155,11 +165,9 @@ function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
                 $qty=decimalQuantity($spec['quantity'],false,$product['sale_unit']!=='unidad');
                 if((float)$qty<=0)fail('Cantidad debe ser mayor que cero.',422);
                 $prior=(float)$product['stock_qty'];
-                $controlled=serialControlled($db,$biz,$pid);$numbers=$spec['serial_numbers']??[];$serialWarehouse=null;
+                $controlled=serialControlled($db,$biz,$pid);$numbers=$spec['serial_numbers']??[];
                 if($controlled){
                     if($supplierId===null||$product['sale_unit']!=='unidad'||(float)$qty!== (float)count($numbers))throw new HttpError('Para recibir '.$product['name'].' selecciona proveedor y registra una serie por unidad.',422,'serial_numbers');
-                    $serialWarehouse=titoLocalLocationId($db,$biz);
-                    $s=$db->prepare('SELECT id FROM warehouses WHERE id=? AND business_id=? AND is_active=1');$s->execute([$serialWarehouse,$biz]);if(!$s->fetchColumn())fail('La bodega local está inactiva.',409);
                     serialReconcile($db,$biz,$pid,$prior);
                 }elseif(array_key_exists('serial_numbers',$spec))fail('Activa el control de serie para este producto antes de recibir series.',422);
                 $after=$prior+(float)$qty;
@@ -169,11 +177,11 @@ function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
                 $line=(int)round((float)$qty*$spec['unit_cost_clp'],0,PHP_ROUND_HALF_UP);
                 $total+=$line;
                 if($total>1000000000000)fail('Recepción demasiado grande.',422);
-                $upd->execute([$balance,$pid,$biz]);
+                $balance=titoReceiveLocationStock($db,$biz,$pid,$warehouseId,(float)$qty,$controlled);
                 $insert->execute([$receiptId,$pid,$product['name'],$qty,$spec['unit_cost_clp'],$line,$previous,$balance]);
-                if($controlled){serialReceive($db,$admin,$pid,$receiptId,$supplierId,$serialWarehouse,$spec['unit_cost_clp'],$date,$numbers);serialReconcile($db,$biz,$pid,$after);}
+                if($controlled){serialReceive($db,$admin,$pid,$receiptId,$supplierId,$warehouseId,$spec['unit_cost_clp'],$date,$numbers);serialReconcile($db,$biz,$pid,$after);}
                 receiptSupplierAssociate($db,$biz,$pid,$supplierId);
-                move($db,$biz,$pid,null,$uid,'receipt',$qty,$balance,mb_substr('Recepción #'.$receiptId.' · '.$supplier,0,250));
+                move($db,$biz,$pid,null,$uid,'receipt',$qty,$balance,mb_substr('Recepción #'.$receiptId.' · '.$supplier.' · '.$warehouse['name'],0,250));
             }
             // Products created from the reception start at zero and get stock
             // through the SAME receipt line and inventory movement as existing ones.
@@ -204,10 +212,10 @@ function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
                 $line=(int)round($value*$spec['unit_cost_clp'],0,PHP_ROUND_HALF_UP);
                 $total+=$line;
                 if($total>1000000000000)fail('Recepción demasiado grande.',422);
-                $upd->execute([$balance,$newId,$biz]);
+                $balance=titoReceiveLocationStock($db,$biz,$newId,$warehouseId,$value,false);
                 $insert->execute([$receiptId,$newId,$np['name'],$qty,$spec['unit_cost_clp'],$line,'0.000',$balance]);
                 receiptSupplierAssociate($db,$biz,$newId,$supplierId);
-                move($db,$biz,$newId,null,$uid,'receipt',$qty,$balance,mb_substr('Recepción #'.$receiptId.' · '.$supplier,0,250));
+                move($db,$biz,$newId,null,$uid,'receipt',$qty,$balance,mb_substr('Recepción #'.$receiptId.' · '.$supplier.' · '.$warehouse['name'],0,250));
                 $newProductIds[]=$newId;
             }
             $st=$db->prepare('UPDATE goods_receipts SET total_cost_clp=? WHERE id=? AND business_id=?');

@@ -76,6 +76,7 @@ function registerOrganizationRoutes(RouteCollectorProxy $group): void {
         try{
             $s=$db->prepare('SELECT id FROM branches WHERE business_id=? AND id=? FOR UPDATE');$s->execute([$biz,$id]);if(!$s->fetch())fail('Sucursal no encontrada.',404);
             if(!$b['is_active']){
+                $s=$db->prepare('SELECT id FROM sales_points WHERE business_id=? AND branch_id=? AND is_active=1 LIMIT 1');$s->execute([$biz,$id]);if($s->fetch())fail('Desactiva los puntos de venta antes de desactivar la sucursal.',409);
                 $s=$db->prepare('SELECT user_id FROM access_user_branches WHERE business_id=? AND branch_id=? LIMIT 1');$s->execute([$biz,$id]);if($s->fetch())fail('Retira las asignaciones de usuarios antes de desactivar la sucursal.',409);
                 $s=$db->prepare('SELECT warehouse_id FROM branch_warehouses WHERE business_id=? AND branch_id=? LIMIT 1');$s->execute([$biz,$id]);if($s->fetch())fail('Desvincula las bodegas antes de desactivar la sucursal.',409);
             }

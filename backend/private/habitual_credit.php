@@ -175,6 +175,7 @@ function registerHabitualCreditRoutes(RouteCollectorProxy $group): void {
             // La fuente de verdad de "pendiente" es credit_accounts, NO sales.payment_method.
             $st=$db->prepare("INSERT INTO sales(business_id,sold_by,request_id,payment_method,total_clp,warehouse_id,cash_session_id) VALUES(?,?,?,'otro',?,?,?)");
             $st->execute([$biz,$uid,$rid,$total,$saleLocation,$cashSessionId]);$saleId=(int)$db->lastInsertId();
+            salesPointRecord($db,$admin,$request,$saleId,$saleLocation);
             $saleItem=$db->prepare('INSERT INTO sale_items(sale_id,product_id,product_name_snapshot,quantity,unit_price_clp,list_price_clp,discount_reason,subtotal_clp) VALUES(?,?,?,?,?,?,?,?)');
             foreach($validated as $v){
                 $p=$v['p'];$next=number_format(max(0,(float)$p['stock_qty']-$v['qty']),3,'.','');

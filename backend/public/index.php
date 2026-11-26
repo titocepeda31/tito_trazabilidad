@@ -15,6 +15,7 @@ require __DIR__ . '/../private/import_products.php';
 require __DIR__ . '/../private/users_sales.php';
 require __DIR__ . '/../private/access_roles.php';
 require __DIR__ . '/../private/organization.php';
+require __DIR__ . '/../private/sales_points.php';
 require __DIR__ . '/../private/platform.php';
 require __DIR__ . '/../private/catalog_maintenance.php';
 require __DIR__ . '/../private/receipts.php';
@@ -190,7 +191,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
     $group->get('/sales',static function(Request $request,Response $response): Response {
         $user=$request->getAttribute('currentUser');
         $biz=(int)$user['business_id'];
-        $sql='SELECT s.id,s.status,s.voided_at,s.total_clp,s.payment_method,s.created_at,s.sold_by,s.warehouse_id,w.name AS warehouse_name,u.email AS seller_email FROM sales s JOIN users u ON u.id=s.sold_by LEFT JOIN warehouses w ON w.id=s.warehouse_id AND w.business_id=s.business_id WHERE s.business_id=?';
+        $sql='SELECT s.id,s.status,s.voided_at,s.total_clp,s.payment_method,s.created_at,s.sold_by,s.warehouse_id,w.name AS warehouse_name,u.email AS seller_email,sp.point_name AS sales_point_name,sp.branch_name AS commercial_branch_name FROM sales s JOIN users u ON u.id=s.sold_by LEFT JOIN warehouses w ON w.id=s.warehouse_id AND w.business_id=s.business_id LEFT JOIN sale_point_snapshots sp ON sp.sale_id=s.id AND sp.business_id=s.business_id WHERE s.business_id=?';
         $params=[$biz];
         if(($user['role']??'')!=='admin'){$sql.=' AND s.sold_by=?';$params[]=(int)$user['id'];}
         $st=db()->prepare($sql.' ORDER BY s.id DESC LIMIT 100');
@@ -227,6 +228,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
             $st=$db->prepare('INSERT INTO sales(business_id,sold_by,request_id,payment_method,total_clp,warehouse_id,cash_session_id) VALUES (?,?,?,?,0,?,?)');
             $st->execute([$biz,$uid,$requestId,$payment,$saleLocation,$cashSessionId]);
             $saleId=(int)$db->lastInsertId();
+            salesPointRecord($db,$user,$request,$saleId,$saleLocation);
             $discountApproval=titoConsumeDiscountApproval($db,$user,$b,$saleId);
             $lock=$db->prepare('SELECT id,name,price_clp,stock_qty,sale_unit FROM products WHERE id=? AND business_id=? AND is_active=1 FOR UPDATE');
             $insert=$db->prepare('INSERT INTO sale_items(sale_id,product_id,product_name_snapshot,quantity,unit_price_clp,list_price_clp,discount_reason,subtotal_clp) VALUES(?,?,?,?,?,?,?,?)');
@@ -310,6 +312,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
     registerUserAndSaleDetailRoutes($group);
     registerAccessRoleRoutes($group);
     registerOrganizationRoutes($group);
+    registerSalesPointRoutes($group);
     registerCatalogMaintenanceRoutes($group);
     registerGoodsReceiptRoutes($group);
     registerInventoryReportRoutes($group);

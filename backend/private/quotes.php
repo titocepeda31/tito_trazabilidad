@@ -129,6 +129,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             $rid=sprintf('%08x-%04x-4%03x-%04x-%012x',random_int(0,0xffffffff),random_int(0,0xffff),random_int(0,0xfff),random_int(0x8000,0xbfff),random_int(0,0xffffffffffff));
             $st=$db->prepare('INSERT INTO sales(business_id,sold_by,request_id,payment_method,total_clp,warehouse_id,cash_session_id) VALUES(?,?,?,?,0,?,?)');
             $st->execute([$biz,$uid,$rid,$payment,$saleLocation,$cashSessionId]);$sid=(int)$db->lastInsertId();
+            salesPointRecord($db,$admin,$request,$sid,$saleLocation);
             $stock=$db->prepare('SELECT id,name,stock_qty,price_clp,sale_unit FROM products WHERE id=? AND business_id=? AND is_active=1 FOR UPDATE');
              $insert=$db->prepare('INSERT INTO sale_items(sale_id,product_id,product_name_snapshot,quantity,unit_price_clp,list_price_clp,discount_reason,subtotal_clp) VALUES(?,?,?,?,?,?,?,?)');
             $total=0;

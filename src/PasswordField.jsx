@@ -1,7 +1,7 @@
 import React,{useId,useState} from 'react';
 
 /** Botón de ojo reutilizable, sin alterar el valor ni el envío de la contraseña. */
-export default function PasswordField({label,name,value,onChange,disabled=false,required=false,autoComplete='off',minLength,maxLength,placeholder}){
+export default function PasswordField({label,name,value,onChange,disabled=false,required=false,autoComplete='off',minLength,maxLength,placeholder,error}){
   const id=useId();
   const [visible,setVisible]=useState(false);
   return <div className="password-field">
@@ -9,7 +9,7 @@ export default function PasswordField({label,name,value,onChange,disabled=false,
     <div className="password-input-wrap">
       <input id={id} type={visible?'text':'password'} name={name} value={value}
         onChange={onChange} disabled={disabled} required={required} minLength={minLength}
-        maxLength={maxLength} autoComplete={autoComplete} placeholder={placeholder}/>
+        maxLength={maxLength} autoComplete={autoComplete} placeholder={placeholder} aria-invalid={error?true:undefined} aria-describedby={error?id+'-error':undefined}/>
       <button type="button" className="password-input-toggle" disabled={disabled}
         onClick={()=>setVisible(old=>!old)} aria-pressed={visible}
         aria-label={visible?'Ocultar '+label.toLowerCase():'Mostrar '+label.toLowerCase()}
@@ -23,5 +23,6 @@ export default function PasswordField({label,name,value,onChange,disabled=false,
           </svg>}
       </button>
     </div>
+    {error&&<span className="platform-field-error" id={id+'-error'}>{error}</span>}
   </div>;
 }

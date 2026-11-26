@@ -2,10 +2,11 @@ export const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/
 
 export const TERMINAL_KEY='tito_pos_terminal_token_v1';
 export class ApiError extends Error {
-  constructor(message, status = 0) {
+  constructor(message, status = 0, field = null) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.field = field;
   }
 }
 export async function api(path, { token, method = 'GET', body, signal } = {}) {
@@ -26,7 +27,7 @@ export async function api(path, { token, method = 'GET', body, signal } = {}) {
   const text = await response.text();
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch { throw new ApiError(`La API respondió algo inesperado (HTTP ${response.status}).`, response.status); }
-  if (!response.ok) throw new ApiError(data.error || `Error HTTP ${response.status}`, response.status);
+  if (!response.ok) throw new ApiError(data.error || `Error HTTP ${response.status}`, response.status, typeof data.field==='string'?data.field:null);
   return data;
 }
 export const pesos = (n) => new Intl.NumberFormat('es-CL', { style: 'currency', currency: 'CLP', maximumFractionDigits: 0 }).format(Number(n) || 0);

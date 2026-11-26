@@ -67,7 +67,9 @@ $errorMiddleware->setDefaultErrorHandler(function(Request $request, Throwable $e
         $message='No fue posible completar la operación.';
     }
     $response=$app->getResponseFactory()->createResponse();
-    $response=respond($response,['error'=>$message],$status);
+    $payload=['error'=>$message];
+    if($error instanceof HttpError && $error->field!==null)$payload['field']=$error->field;
+    $response=respond($response,$payload,$status);
     // El middleware de error está fuera de CORS; devolver el error legible solo al origen permitido.
     $origin=$request->getHeaderLine('Origin');
     try {

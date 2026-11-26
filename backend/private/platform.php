@@ -32,6 +32,11 @@ function platformCheckSchema(PDO $db): void {
     $st=$db->query("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('businesses','business_profiles','users','warehouses','platform_business_creations') AND ENGINE='InnoDB'");
     if((int)$st->fetchColumn()!==5)fail('No se pudo verificar el soporte transaccional de la creación de empresas.',503);
 }
+function platformRequired(array $body,string $field,string $label,int $max): string {
+    $v=$body[$field]??null;
+    if(!is_string($v)||trim($v)===''||mb_strlen(trim($v))>$max)throw new HttpError($label.': ingresa un valor válido.',422,$field);
+    return trim($v);
+}
 function registerPlatformRoutes(App $app): void {
     $app->post('/platform/login',static function(Request $request,Response $response): Response {
         $key=platformKey();$db=db();platformReady($db);$body=requestBody($request);
@@ -63,23 +68,30 @@ function registerPlatformRoutes(App $app): void {
     $app->post('/platform/businesses',static function(Request $request,Response $response): Response {
         $db=db();platformAuth($request,$db);platformCheckSchema($db);$b=requestBody($request);
         if(array_diff(array_keys($b),['name','legal_name','tax_id','admin_email','admin_password']))fail('Campos no permitidos.',422);
-        $name=requireString($b,'name',120);$legal=requireString($b,'legal_name',160);
-        $rut=orgRut(requireString($b,'tax_id',16));
-        $email=strtolower(requireString($b,'admin_email',190));
-        if(!filter_var($email,FILTER_VALIDATE_EMAIL))fail('Correo del administrador inválido.',422);
+        $name=platformRequired($b,'name','Nombre comercial',120);$legal=platformRequired($b,'legal_name','Razón social',160);
+        try{$rut=orgRut(platformRequired($b,'tax_id','RUT',16));}
+        catch(HttpError $e){throw new HttpError($e->getMessage(),$e->status,'tax_id');}
+        $email=strtolower(platformRequired($b,'admin_email','Correo del administrador',190));
+        if(!filter_var($email,FILTER_VALIDATE_EMAIL))throw new HttpError('Correo del administrador inválido.',422,'admin_email');
         $password=$b['admin_password']??null;
-        if(is_string($password)&&hash_equals(platformKey(),$password))fail('Usa una contraseña distinta de la clave de plataforma.',422);
-        $hash=newPasswordHash($password);
+        if(is_string($password)&&hash_equals(platformKey(),$password))throw new HttpError('Usa una contraseña distinta de la clave de plataforma.',422,'admin_password');
+        try{$hash=newPasswordHash($password);}catch(HttpError $e){throw new HttpError($e->getMessage(),$e->status,'admin_password');}
         $lock=$db->query("SELECT GET_LOCK('tito_trazabilidad_provision_v1',5)")->fetchColumn();
         if((int)$lock!==1)fail('Hay otra creación en curso. Reintenta.',409);
         try {
             $db->beginTransaction();
-            $s=$db->prepare('SELECT id FROM users WHERE email=? LIMIT 1');$s->execute([$email]);if($s->fetchColumn())fail('El correo ya está registrado en el sistema.',409);
+            $s=$db->prepare('SELECT id FROM users WHERE email=? LIMIT 1');$s->execute([$email]);if($s->fetchColumn())throw new HttpError('El correo ya está registrado en el sistema. Utiliza otro correo.',409,'admin_email');
             $s=$db->prepare("SELECT business_id FROM business_profiles WHERE UPPER(REPLACE(REPLACE(REPLACE(tax_id,'.',''),'-',''),' ',''))=? LIMIT 1");
-            $s->execute([str_replace('-','',$rut)]);if($s->fetchColumn())fail('Ya existe una empresa con ese RUT.',409);
+            $s->execute([str_replace('-','',$rut)]);if($s->fetchColumn())throw new HttpError('Ya existe una empresa con ese RUT.',409,'tax_id');
             $s=$db->prepare('INSERT INTO businesses(name) VALUES(?)');$s->execute([$name]);$id=(int)$db->lastInsertId();
             $s=$db->prepare('INSERT INTO business_profiles(business_id,legal_name,tax_id) VALUES(?,?,?)');$s->execute([$id,$legal,$rut]);
-            $s=$db->prepare("INSERT INTO users(business_id,email,password_hash,role,is_active) VALUES(?,?,?,'admin',1)");$s->execute([$id,$email,$hash]);$uid=(int)$db->lastInsertId();
+            try{
+                $s=$db->prepare("INSERT INTO users(business_id,email,password_hash,role,is_active) VALUES(?,?,?,'admin',1)");$s->execute([$id,$email,$hash]);
+            }catch(PDOException $e){
+                if((int)($e->errorInfo[1]??0)===1062)throw new HttpError('El correo ya está registrado en el sistema. Utiliza otro correo.',409,'admin_email');
+                throw $e;
+            }
+            $uid=(int)$db->lastInsertId();
             // Ubicaciones de compatibilidad requeridas por el inventario y la caja heredados.
             // Son ubicaciones vacías, no sucursales comerciales ni terminales habilitados.
             $s=$db->prepare("INSERT INTO warehouses(business_id,code,name,is_sales_location,is_active) VALUES(?,'local','Inventario inicial',1,1),(?,'bodega','Bodega de respaldo',0,1)");$s->execute([$id,$id]);

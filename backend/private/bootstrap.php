@@ -41,7 +41,7 @@ function db(): PDO {
 }
 
 class HttpError extends RuntimeException {
-    public function __construct(string $message, public int $status=400){parent::__construct($message);}
+    public function __construct(string $message, public int $status=400, public ?string $field=null){parent::__construct($message);}
 }
 function fail(string $message, int $status=400): never {throw new HttpError($message,$status);}
 function requireString(array $b,string $key,int $max=120): string {

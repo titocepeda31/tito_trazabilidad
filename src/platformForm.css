@@ -1,0 +1,4 @@
+.platform-form-error{display:grid;gap:5px;padding:14px 16px;border:1px solid #e7a4a4;border-radius:9px;background:#fff1f1;color:#9b2020;line-height:1.45}
+.platform-field-error{display:block;color:#b42318;font-size:12px;font-weight:600;line-height:1.5;margin:0}
+.platform-company-form input[aria-invalid="true"]{border-color:#d92d20;background:#fffafa}
+.platform-company-form input[aria-invalid="true"]:focus{box-shadow:0 0 0 3px #d92d2022;border-color:#d92d20}

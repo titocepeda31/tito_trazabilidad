@@ -40,8 +40,11 @@ export default function WarehousesPanel({request,notify,onChange}){
   const [busy,setBusy]=useState(false);
   const [creating,setCreating]=useState(false);
   const [locationName,setLocationName]=useState('');
+  const [editing,setEditing]=useState(null);
+  const [editName,setEditName]=useState('');
+  const [renaming,setRenaming]=useState(false);
   const [pending,setPending]=useState(()=>{try{return JSON.parse(sessionStorage.getItem(pendingKey)||'null');}catch{return null;}});
-  const locked=busy||Boolean(pending);
+  const locked=busy||renaming||Boolean(pending);
   const from=warehouses.find(w=>String(w.id)===source);
   const to=warehouses.find(w=>String(w.id)===target);
   const qtyAt=(p,w)=>Number(p.locations?.[String(w?.id)]??(w?.code==='local'?p.local_qty:w?.code==='bodega'?p.bodega_qty:0));
@@ -101,6 +104,22 @@ export default function WarehousesPanel({request,notify,onChange}){
     }catch(err){notify('No se pudo crear la ubicación: '+err.message,'error');}
     finally{setCreating(false);}
   }
+  async function renameLocation(e){
+    e.preventDefault();
+    if(locked||creating||!editing)return;
+    const name=editName.trim();
+    if(name.length<2){notify('Indica un nombre de al menos 2 caracteres.','error');return;}
+    if(name===editing.name){setEditing(null);return;}
+    setRenaming(true);
+    try{
+      await request('/warehouses/'+editing.id+'/rename',{method:'POST',body:{name}});
+      setEditing(null);
+      notify('Nombre actualizado. Las existencias no cambiaron.','success');
+      await load();
+      await onChange?.();
+    }catch(err){notify(err.message,'error');}
+    finally{setRenaming(false);}
+  }
   function submit(e){
     e.preventDefault();if(locked)return;
     if(!from||!to||source===target){notify('Selecciona ubicaciones diferentes.','error');return;}
@@ -129,7 +148,7 @@ export default function WarehousesPanel({request,notify,onChange}){
       </form>
     </section>
     <div className="warehouse-cards">
-      {warehouses.map(w=><div className="panel pad warehouse-card" key={w.id}><div className="warehouse-icon">▤</div><div><strong>{w.name}</strong><p className="muted">Ubicación de inventario</p></div><div className="warehouse-sum">{stocks.filter(p=>qtyAt(p,w)>0).length}<small>productos con existencias</small></div></div>)}
+      {warehouses.map(w=><div className="panel pad warehouse-card" key={w.id}><div className="warehouse-icon">▤</div><div><strong>{w.name}</strong><p className="muted">Ubicación de inventario</p><button type="button" className="ghost mini" disabled={locked||creating} aria-label={'Editar nombre de '+w.name} onClick={()=>{setEditing(w);setEditName(w.name);}}>Editar nombre</button></div><div className="warehouse-sum">{stocks.filter(p=>qtyAt(p,w)>0).length}<small>productos con existencias</small></div></div>)}
     </div>
     <p className="helper warehouse-explainer">El resumen cuenta productos con existencias por ubicación. Cada ubicación nueva empieza en cero y recibe productos mediante traslados, sin modificar el stock total de la empresa.</p>
     <section className="panel pad warehouse-transfer">
@@ -184,6 +203,7 @@ export default function WarehousesPanel({request,notify,onChange}){
       <WarehousePagination scope="historial de traslados" pagination={visibleTransfers} pageSize={transferPageSize} onChangePage={setTransferPage} onChangeSize={n=>{setTransferPageSize(n);setTransferPage(1);}}/>
       <p className="warehouse-data-limit">La API devuelve los últimos 100 traslados. Estas páginas organizan los registros cargados; el historial anterior requiere paginación en el servidor.</p>
     </section>
+    {editing&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget&&!renaming)setEditing(null);}}><div className="modal" role="dialog" aria-modal="true" aria-label="Editar nombre de ubicación"><div className="modal-head"><h3>Editar ubicación</h3><button type="button" className="ghost close" aria-label="Cerrar" disabled={renaming} onClick={()=>setEditing(null)}>×</button></div><p className="muted">Solo se cambia el nombre. Se conservan existencias, código, asignaciones y movimientos registrados.</p><form className="formstack" onSubmit={renameLocation}><label>Nombre de la ubicación<input autoFocus value={editName} maxLength={120} minLength={2} required disabled={renaming} onChange={e=>setEditName(e.target.value)}/></label><div className="receipt-buttons"><button className="primary" disabled={locked||creating}>{renaming?'Guardando…':'Guardar cambios'}</button><button type="button" className="ghost" disabled={renaming} onClick={()=>setEditing(null)}>Cancelar</button></div></form></div></div>}
     {selected&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setSelected(null);}}><div className="modal" role="dialog" aria-modal="true" aria-label="Detalle traslado"><div className="modal-head"><h3>Traslado #{selected.transfer.id}</h3><button className="ghost close" onClick={()=>setSelected(null)}>×</button></div><p><strong>Trayecto:</strong> {selected.transfer.source_name} → {selected.transfer.target_name}</p><p><strong>Motivo:</strong> {selected.transfer.note}</p><p><strong>Registró:</strong> {selected.transfer.actor_email}</p><div className="table-wrap"><table><thead><tr><th>Producto</th><th>Cantidad</th><th>Antes origen</th><th>Después origen</th><th>Antes destino</th><th>Después destino</th></tr></thead><tbody>{selected.items.map(i=><tr key={i.product_id}><td>{i.name}</td><td>{qtyFormat(i.quantity)}</td><td>{qtyFormat(i.source_before)}</td><td>{qtyFormat(i.source_after)}</td><td>{qtyFormat(i.target_before)}</td><td>{qtyFormat(i.target_after)}</td></tr>)}</tbody></table></div></div></div>}
   </div>;
 }

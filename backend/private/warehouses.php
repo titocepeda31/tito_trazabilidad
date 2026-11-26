@@ -362,6 +362,27 @@ function registerWarehouseRoutes(RouteCollectorProxy $group): void {
             return respond($response,['ok'=>true,'warehouse'=>['id'=>$warehouseId,'code'=>$code,'name'=>$name,'is_sales_location'=>0,'is_active'=>1],'sales_enabled'=>false],201);
         }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
     });
+    $group->post('/warehouses/{id:[0-9]+}/rename',static function(Request $request,Response $response,array $args): Response {
+        $admin=adminOnly($request);$biz=(int)$admin['business_id'];$id=(int)$args['id'];
+        $body=requestBody($request);
+        if(array_diff(array_keys($body),['name']))fail('Campos no permitidos.',422);
+        $name=requireString($body,'name',120);
+        if(mb_strlen($name)<2)fail('Indica un nombre de al menos 2 caracteres.',422);
+        $db=db();
+        try{
+            $db->beginTransaction();
+            // El alta de ubicaciones usa el mismo bloqueo por empresa.
+            $st=$db->prepare('SELECT id FROM businesses WHERE id=? FOR UPDATE');$st->execute([$biz]);
+            if(!$st->fetchColumn())fail('Empresa no encontrada.',404);
+            $st=$db->prepare('SELECT id FROM warehouses WHERE id=? AND business_id=? FOR UPDATE');$st->execute([$id,$biz]);
+            if(!$st->fetchColumn())fail('Ubicación de inventario no encontrada.',404);
+            $st=$db->prepare('SELECT id FROM warehouses WHERE business_id=? AND id<>? AND LOWER(name)=LOWER(?) LIMIT 1');$st->execute([$biz,$id,$name]);
+            if($st->fetchColumn())fail('Ya existe una ubicación con ese nombre.',409);
+            $st=$db->prepare('UPDATE warehouses SET name=? WHERE id=? AND business_id=?');$st->execute([$name,$id,$biz]);
+            $db->commit();
+            return respond($response,['ok'=>true,'warehouse'=>['id'=>$id,'name'=>$name]]);
+        }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
+    });
     $group->get('/warehouses/stock',static function(Request $request,Response $response): Response {
         $user=$request->getAttribute('currentUser');$biz=(int)$user['business_id'];
         $st=db()->prepare("SELECT p.id AS product_id,p.name,p.sku,p.sale_unit,p.stock_qty AS total_qty,p.is_active,COALESCE(SUM(CASE WHEN w.code='local' THEN ws.qty ELSE 0 END),0) AS local_qty,COALESCE(SUM(CASE WHEN w.code='bodega' THEN ws.qty ELSE 0 END),0) AS bodega_qty FROM products p LEFT JOIN warehouse_stocks ws ON ws.product_id=p.id AND ws.business_id=p.business_id LEFT JOIN warehouses w ON w.id=ws.warehouse_id AND w.business_id=p.business_id WHERE p.business_id=? GROUP BY p.id,p.name,p.sku,p.sale_unit,p.stock_qty,p.is_active ORDER BY p.name,p.id LIMIT 3000");

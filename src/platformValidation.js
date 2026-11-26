@@ -22,7 +22,7 @@ export function validateCompany(values){
   return errors;
 }
 export function companyErrorField(error){
-  const fields=['name','legal_name','tax_id','admin_email','admin_password','confirm'];
+  const fields=['name','legal_name','tax_id','admin_email','admin_password','confirm','address','city','email','phone','reason'];
   if(fields.includes(error?.field))return error.field;
   const msg=String(error?.message??'').toLowerCase();
   if(/rut inválido|ese rut|rut incorrecto/.test(msg))return 'tax_id';
@@ -30,4 +30,16 @@ export function companyErrorField(error){
   if(/contraseña/.test(msg))return 'admin_password';
   const field=fields.find(f=>msg==='campo inválido: '+f);
   return field||null;
+}
+
+export function validateCompanyEdit(values){
+  const errors={};
+  for(const [key,label,max] of [['name','nombre comercial',120],['legal_name','razón social',160],['tax_id','RUT',16],['address','dirección',200],['city','ciudad',100],['email','correo de contacto',160],['phone','teléfono',40]]){
+    const value=String(values[key]??'').trim();
+    if(!value&&['name','legal_name','tax_id'].includes(key))errors[key]='Ingresa '+label+'.';
+    else if(value.length>max)errors[key]='Máximo '+max+' caracteres.';
+  }
+  if(!errors.tax_id&&!validRut(values.tax_id))errors.tax_id='RUT incorrecto. Revisa el dígito verificador.';
+  if(values.email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(values.email).trim()))errors.email='Correo de contacto inválido.';
+  return errors;
 }

@@ -19,7 +19,7 @@ function authUser(ServerRequestInterface $request, PDO $db): array {
     $header=$request->getHeaderLine('Authorization');
     if(!preg_match('/^Bearer ([a-f0-9]{64})$/i',$header,$m))fail('Necesitas iniciar sesión.',401);
     $tokenHash=hash('sha256',strtolower($m[1]));
-    $st=$db->prepare('SELECT users.id,users.business_id,users.email,users.role,businesses.name AS business_name FROM sessions JOIN users ON users.id=sessions.user_id JOIN businesses ON businesses.id=users.business_id WHERE sessions.token_hash=? AND sessions.expires_at>UTC_TIMESTAMP() AND users.is_active=1 LIMIT 1');
+    $st=$db->prepare('SELECT users.id,users.business_id,users.email,users.role,businesses.name AS business_name FROM sessions JOIN users ON users.id=sessions.user_id JOIN businesses ON businesses.id=users.business_id LEFT JOIN business_access_state bas ON bas.business_id=businesses.id WHERE COALESCE(bas.is_active,1)=1 AND sessions.token_hash=? AND sessions.expires_at>UTC_TIMESTAMP() AND users.is_active=1 LIMIT 1');
     $st->execute([$tokenHash]);
     $user=$st->fetch();
     if(!$user)fail('Sesión expirada o inválida.',401);

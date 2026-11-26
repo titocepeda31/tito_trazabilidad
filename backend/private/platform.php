@@ -13,8 +13,8 @@ function platformKey(): string {
 function platformReady(PDO $db): void {
     if($db->query('SELECT DATABASE()')->fetchColumn()!=='maderas7_ttrazabilidad')fail('Base de plataforma incorrecta.',503);
     orgReady($db);
-    $count=$db->query("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('platform_sessions','platform_business_creations')");
-    if((int)$count->fetchColumn()!==2)fail('Falta instalar la migración multiempresa.',503);
+    $count=$db->query("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('platform_sessions','platform_business_creations','business_access_state','business_access_events')");
+    if((int)$count->fetchColumn()!==4)fail('Falta instalar la migración multiempresa 002 o 003.',503);
 }
 function platformAuth(Request $request,PDO $db): string {
     $key=platformKey();platformReady($db);
@@ -59,10 +59,10 @@ function registerPlatformRoutes(App $app): void {
     });
     $app->get('/platform/businesses',static function(Request $request,Response $response): Response {
         $db=db();platformAuth($request,$db);
-        $rows=$db->query("SELECT b.id,b.name,p.legal_name,p.tax_id,
+        $rows=$db->query("SELECT b.id,b.name,p.legal_name,p.tax_id,p.address,p.city,p.email,p.phone,COALESCE(bas.is_active,1) AS is_active,bas.reason AS status_reason,bas.updated_at AS status_updated_at,
             (SELECT COUNT(*) FROM branches s WHERE s.business_id=b.id) AS branch_count,
             (SELECT COUNT(*) FROM users u WHERE u.business_id=b.id AND u.is_active=1) AS active_users
-            FROM businesses b LEFT JOIN business_profiles p ON p.business_id=b.id ORDER BY b.name,b.id")->fetchAll();
+            FROM businesses b LEFT JOIN business_profiles p ON p.business_id=b.id LEFT JOIN business_access_state bas ON bas.business_id=b.id ORDER BY b.name,b.id")->fetchAll();
         return respond($response,['businesses'=>$rows]);
     });
     $app->post('/platform/businesses',static function(Request $request,Response $response): Response {
@@ -76,13 +76,11 @@ function registerPlatformRoutes(App $app): void {
         $password=$b['admin_password']??null;
         if(is_string($password)&&hash_equals(platformKey(),$password))throw new HttpError('Usa una contraseña distinta de la clave de plataforma.',422,'admin_password');
         try{$hash=newPasswordHash($password);}catch(HttpError $e){throw new HttpError($e->getMessage(),$e->status,'admin_password');}
-        $lock=$db->query("SELECT GET_LOCK('tito_trazabilidad_provision_v1',5)")->fetchColumn();
-        if((int)$lock!==1)fail('Hay otra creación en curso. Reintenta.',409);
+        orgLockRut($db);
         try {
             $db->beginTransaction();
             $s=$db->prepare('SELECT id FROM users WHERE email=? LIMIT 1');$s->execute([$email]);if($s->fetchColumn())throw new HttpError('El correo ya está registrado en el sistema. Utiliza otro correo.',409,'admin_email');
-            $s=$db->prepare("SELECT business_id FROM business_profiles WHERE UPPER(REPLACE(REPLACE(REPLACE(tax_id,'.',''),'-',''),' ',''))=? LIMIT 1");
-            $s->execute([str_replace('-','',$rut)]);if($s->fetchColumn())throw new HttpError('Ya existe una empresa con ese RUT.',409,'tax_id');
+            orgCheckRutUnique($db,$rut);
             $s=$db->prepare('INSERT INTO businesses(name) VALUES(?)');$s->execute([$name]);$id=(int)$db->lastInsertId();
             $s=$db->prepare('INSERT INTO business_profiles(business_id,legal_name,tax_id) VALUES(?,?,?)');$s->execute([$id,$legal,$rut]);
             try{
@@ -102,6 +100,47 @@ function registerPlatformRoutes(App $app): void {
             if($db->inTransaction())$db->rollBack();
             if($e instanceof PDOException&&(int)($e->errorInfo[1]??0)===1062)fail('Ya existe un registro con esos datos.',409);
             throw $e;
-        }finally{$db->query("SELECT RELEASE_LOCK('tito_trazabilidad_provision_v1')");}
+        }finally{orgUnlockRut($db);}
+    });
+    $app->post('/platform/businesses/{id:[0-9]+}/update',static function(Request $request,Response $response,array $args): Response {
+        $db=db();platformAuth($request,$db);$id=(int)$args['id'];$b=requestBody($request);
+        if(array_diff(array_keys($b),['name','legal_name','tax_id','address','city','email','phone']))fail('Campos no permitidos.',422);
+        $name=platformRequired($b,'name','Nombre comercial',120);$legal=platformRequired($b,'legal_name','Razón social',160);
+        try{$rut=orgRut(platformRequired($b,'tax_id','RUT',16));}
+        catch(HttpError $e){throw new HttpError($e->getMessage(),$e->status,'tax_id');}
+        $contact=[];
+        foreach(['address'=>200,'city'=>100,'email'=>160,'phone'=>40] as $key=>$max){
+            try{$contact[$key]=orgText($b,$key,$max);}catch(HttpError $e){throw new HttpError($e->getMessage(),$e->status,$key);}
+        }
+        if($contact['email']!==''&&!filter_var($contact['email'],FILTER_VALIDATE_EMAIL))throw new HttpError('Correo de contacto inválido.',422,'email');
+        orgLockRut($db);
+        try{
+            $db->beginTransaction();
+            $s=$db->prepare('SELECT id FROM businesses WHERE id=? FOR UPDATE');$s->execute([$id]);if(!$s->fetchColumn())fail('Empresa no encontrada.',404);
+            orgCheckRutUnique($db,$rut,$id);
+            $s=$db->prepare('UPDATE businesses SET name=? WHERE id=?');$s->execute([$name,$id]);
+            $s=$db->prepare('INSERT INTO business_profiles(business_id,legal_name,tax_id,address,city,email,phone) VALUES(?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE legal_name=VALUES(legal_name),tax_id=VALUES(tax_id),address=VALUES(address),city=VALUES(city),email=VALUES(email),phone=VALUES(phone)');
+            $s->execute([$id,$legal,$rut,$contact['address'],$contact['city'],$contact['email'],$contact['phone']]);
+            $db->commit();return respond($response,['ok'=>true]);
+        }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}finally{orgUnlockRut($db);}
+    });
+    $app->post('/platform/businesses/{id:[0-9]+}/status',static function(Request $request,Response $response,array $args): Response {
+        $db=db();platformAuth($request,$db);$id=(int)$args['id'];$b=requestBody($request);
+        if(array_diff(array_keys($b),['is_active','reason'])||!is_bool($b['is_active']??null))fail('Estado inválido.',422);
+        $active=$b['is_active'];$reason=orgText($b,'reason',250);
+        if(!$active&&$reason==='')throw new HttpError('Indica el motivo de desactivación.',422,'reason');
+        $db->beginTransaction();
+        try{
+            $s=$db->prepare('SELECT id FROM businesses WHERE id=? FOR UPDATE');$s->execute([$id]);if(!$s->fetchColumn())fail('Empresa no encontrada.',404);
+            $s=$db->prepare('SELECT is_active FROM business_access_state WHERE business_id=? FOR UPDATE');$s->execute([$id]);$old=$s->fetchColumn();
+            if(($old===false?1:(int)$old)===(int)$active){$db->commit();return respond($response,['ok'=>true,'unchanged'=>true]);}
+            $s=$db->prepare('INSERT INTO business_access_state(business_id,is_active,reason) VALUES(?,?,?) ON DUPLICATE KEY UPDATE is_active=VALUES(is_active),reason=VALUES(reason)');
+            $s->execute([$id,(int)$active,$reason]);
+            $s=$db->prepare('INSERT INTO business_access_events(business_id,is_active,reason) VALUES(?,?,?)');$s->execute([$id,(int)$active,$reason]);
+            if(!$active){
+                $s=$db->prepare('DELETE s FROM sessions s JOIN users u ON u.id=s.user_id WHERE u.business_id=?');$s->execute([$id]);
+            }
+            $db->commit();return respond($response,['ok'=>true,'is_active'=>$active]);
+        }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
     });
 }

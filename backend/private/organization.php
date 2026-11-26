@@ -24,6 +24,19 @@ function orgRut(string $raw): string {
     if(substr($v,-1)!==$dv) fail('RUT inválido.',422);
     return $n.'-'.$dv;
 }
+// Serialize RUT writes across the commercial profile and platform provisioning.
+function orgLockRut(PDO $db): void {
+    if((int)$db->query("SELECT GET_LOCK('tito_trazabilidad_provision_v1',5)")->fetchColumn()!==1)fail('Hay otra modificación de empresa en curso. Reintenta.',409);
+}
+function orgUnlockRut(PDO $db): void {
+    $db->query("SELECT RELEASE_LOCK('tito_trazabilidad_provision_v1')");
+}
+function orgCheckRutUnique(PDO $db,string $rut,int $except=0): void {
+    if($rut==='')return;
+    $s=$db->prepare("SELECT business_id FROM business_profiles WHERE business_id<>? AND UPPER(REPLACE(REPLACE(REPLACE(tax_id,'.',''),'-',''),' ',''))=? LIMIT 1");
+    $s->execute([$except,str_replace('-','',$rut)]);
+    if($s->fetchColumn())throw new HttpError('Ya existe una empresa con ese RUT.',409,'tax_id');
+}
 function registerOrganizationRoutes(RouteCollectorProxy $group): void {
     $group->get('/organization',static function(Request $request,Response $response): Response {
         $admin=adminOnly($request);$biz=(int)$admin['business_id'];$db=db();orgReady($db);
@@ -39,8 +52,12 @@ function registerOrganizationRoutes(RouteCollectorProxy $group): void {
         $admin=adminOnly($request);$biz=(int)$admin['business_id'];$db=db();orgReady($db);$b=requestBody($request);
         $legal=requireString($b,'legal_name',160);$rut=orgRut(orgText($b,'tax_id',16));$email=orgText($b,'email',160);
         if($email!==''&&!filter_var($email,FILTER_VALIDATE_EMAIL))fail('Correo inválido.',422);
-        $s=$db->prepare('INSERT INTO business_profiles(business_id,legal_name,tax_id,address,city,email,phone) VALUES(?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE legal_name=VALUES(legal_name),tax_id=VALUES(tax_id),address=VALUES(address),city=VALUES(city),email=VALUES(email),phone=VALUES(phone)');
-        $s->execute([$biz,$legal,$rut,orgText($b,'address',200),orgText($b,'city',100),$email,orgText($b,'phone',40)]);
+        orgLockRut($db);
+        try{
+            orgCheckRutUnique($db,$rut,$biz);
+            $s=$db->prepare('INSERT INTO business_profiles(business_id,legal_name,tax_id,address,city,email,phone) VALUES(?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE legal_name=VALUES(legal_name),tax_id=VALUES(tax_id),address=VALUES(address),city=VALUES(city),email=VALUES(email),phone=VALUES(phone)');
+            $s->execute([$biz,$legal,$rut,orgText($b,'address',200),orgText($b,'city',100),$email,orgText($b,'phone',40)]);
+        }finally{orgUnlockRut($db);}
         return respond($response,['ok'=>true]);
     });
     $group->post('/organization/branches',static function(Request $request,Response $response): Response {

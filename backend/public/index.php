@@ -103,9 +103,23 @@ $app->post('/auth/login',static function(Request $request,Response $response): R
         fail('Credenciales incorrectas.',401);
     }
     throttleLogin($email,null);
-    $token=bin2hex(random_bytes(32));
-    $st=$db->prepare('INSERT INTO sessions(user_id,token_hash,expires_at) VALUES(?,?,DATE_ADD(UTC_TIMESTAMP(), INTERVAL 4 HOUR))');
-    $st->execute([(int)$user['id'],hash('sha256',$token)]);
+    // Serializar el inicio de sesión con la suspensión de empresa.
+    $db->beginTransaction();
+    try{
+        $st=$db->prepare('SELECT id FROM businesses WHERE id=? FOR UPDATE');$st->execute([(int)$user['business_id']]);
+        if(!$st->fetchColumn())fail('Credenciales incorrectas.',401);
+        $st=$db->prepare('SELECT is_active FROM business_access_state WHERE business_id=? FOR UPDATE');$st->execute([(int)$user['business_id']]);
+        $state=$st->fetchColumn();
+        if($state!==false&&(int)$state!==1)fail('Empresa desactivada. Contacta al administrador de la plataforma.',403);
+        $st=$db->prepare('SELECT password_hash,is_active,role,email FROM users WHERE id=? AND business_id=? FOR UPDATE');
+        $st->execute([(int)$user['id'],(int)$user['business_id']]);$current=$st->fetch();
+        if(!$current||(int)$current['is_active']!==1||!hash_equals($user['password_hash'],$current['password_hash']))fail('Credenciales incorrectas.',401);
+        $user['role']=$current['role'];$user['email']=$current['email'];
+        $token=bin2hex(random_bytes(32));
+        $st=$db->prepare('INSERT INTO sessions(user_id,token_hash,expires_at) VALUES(?,?,DATE_ADD(UTC_TIMESTAMP(), INTERVAL 4 HOUR))');
+        $st->execute([(int)$user['id'],hash('sha256',$token)]);
+        $db->commit();
+    }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
     unset($user['password_hash']);
     return respond($response,['token'=>$token,'user'=>$user]);
 });

@@ -84,4 +84,5 @@ for f in index.php .htaccess; do
   mv -f "$WEB/$f.new" "$WEB/$f"
 done
 echo "OK: API Tito Trazabilidad desplegada. Base verificada: $DB_NAME. Sin migraciones ni modificaciones en Tito POS."
-echo "Siguiente: comprobar /tito-trazabilidad-api/health y configurar CORS para Vercel."
+echo "CORS: https://titotrazabilidad.vercel.app autorizado por la aplicación."
+echo "Siguiente: comprobar /tito-trazabilidad-api/health y el acceso desde Vercel."

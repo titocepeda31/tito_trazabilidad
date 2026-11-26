@@ -12,6 +12,15 @@ function config(): array {
         if (!is_array($settings)) {
             throw new RuntimeException('Configuración inválida');
         }
+        // Origen de producción de Tito Trazabilidad; conservar orígenes locales explícitos.
+        $localOrigins = $settings['allowed_origins'] ?? [];
+        if (!is_array($localOrigins)) {
+            throw new RuntimeException('Configuración CORS inválida');
+        }
+        $settings['allowed_origins'] = array_values(array_unique(array_merge(
+            $localOrigins,
+            ['https://titotrazabilidad.vercel.app']
+        )));
     }
     return $settings;
 }

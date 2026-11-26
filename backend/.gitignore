@@ -1,0 +1,18 @@
+# Archivos locales de cPanel: nunca versionar
+/private/config.php
+/private/onesignal_local.php
+/private/*_local.php
+/.env
+/.env.*
+/vendor/
+/runtime/
+/backups/
+/*.log
+/*.sql
+/*.sql.gz
+/*.tgz
+/*.tar.gz
+/.htpasswd
+/.user.ini
+/public/.htaccess
+/private/.htaccess

@@ -1,0 +1,17 @@
+{
+  "name": "titolabs/tito-trazabilidad-api",
+  "description": "API Slim 4 para Tito POS; base MySQL aislada en cPanel",
+  "type": "project",
+  "require": {
+    "php": "^8.3",
+    "ext-json": "*",
+    "ext-pdo_mysql": "*",
+    "ext-mbstring": "*",
+    "slim/slim": "^4.15.3",
+    "slim/psr7": "^1.8"
+  },
+  "config": {
+    "sort-packages": true,
+    "optimize-autoloader": true
+  }
+}

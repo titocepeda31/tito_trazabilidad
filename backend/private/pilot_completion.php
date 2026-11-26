@@ -75,6 +75,7 @@ function registerPilotCompletionRoutes(RouteCollectorProxy $group): void {
             $st=$db->prepare('SELECT id,name,sale_unit,stock_qty FROM products WHERE business_id=? AND id=? AND is_active=1 FOR UPDATE');
             $st->execute([$biz,$pid]);$p=$st->fetch();$st->closeCursor();
             if(!$p)fail('Producto no disponible.',422);
+            serialRejectLegacy($db,$biz,$pid);
             if($p['sale_unit']==='unidad'&&floor(abs($delta))!==abs($delta))fail('Este producto requiere cantidades enteras.',422);
             $st=$db->prepare('SELECT w.id AS warehouse_id,w.code,ws.qty FROM warehouse_stocks ws JOIN warehouses w ON w.id=ws.warehouse_id AND w.business_id=ws.business_id WHERE ws.business_id=? AND ws.product_id=? AND w.code IN (\'local\',\'bodega\') ORDER BY w.id FOR UPDATE');
             $st->execute([$biz,$pid]);$locs=$st->fetchAll();$st->closeCursor();

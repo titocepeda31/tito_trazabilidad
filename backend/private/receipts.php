@@ -51,7 +51,8 @@ function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
         if(!$receipt)fail('Recepción no encontrada.',404);
         $st=$db->prepare('SELECT i.id,i.product_id,i.product_name_snapshot,i.quantity,i.unit_cost_clp,i.line_total_clp,i.stock_before,i.stock_after,p.sku FROM goods_receipt_items i JOIN products p ON p.id=i.product_id WHERE i.receipt_id=? AND p.business_id=? ORDER BY i.id');
         $st->execute([$id,$biz]);
-        return respond($response,['receipt'=>$receipt,'items'=>$st->fetchAll()]);
+        $items=$st->fetchAll();$s=$db->prepare('SELECT product_id,serial_number FROM serial_units WHERE business_id=? AND receipt_id=? ORDER BY serial_number');$s->execute([$biz,$id]);$map=[];foreach($s->fetchAll() as $r)$map[$r['product_id']][]=$r['serial_number'];foreach($items as &$i)$i['serial_numbers']=$map[$i['product_id']]??[];unset($i);
+        return respond($response,['receipt'=>$receipt,'items'=>$items]);
     });
 
     $group->post('/receipts',static function(Request $request, Response $response): Response {
@@ -84,7 +85,7 @@ function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
         $specs=[];$newSpecs=[];
         foreach($items as $item){
             if(!is_array($item))fail('Línea de recepción inválida.',422);
-            $allowed=['product_id','new_product','quantity','unit_cost_clp'];
+            $allowed=['product_id','new_product','quantity','unit_cost_clp','serial_numbers'];
             if(array_diff(array_keys($item),$allowed))fail('Campos de producto inválidos.',422);
             $existing=array_key_exists('product_id',$item);
             $creating=array_key_exists('new_product',$item);
@@ -95,7 +96,9 @@ function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
                 $pid=filter_var($item['product_id'],FILTER_VALIDATE_INT,['options'=>['min_range'=>1]]);
                 if($pid===false||isset($specs[$pid]))fail('Producto duplicado o inválido.',422);
                 $specs[$pid]=['quantity'=>$item['quantity']??null,'unit_cost_clp'=>$cost];
+                if(array_key_exists('serial_numbers',$item))$specs[$pid]['serial_numbers']=serialNormalizeList($item['serial_numbers']);
             }else{
+                if(array_key_exists('serial_numbers',$item))fail('Crea primero el producto y activa su control de serie.',422);
                 $product=$item['new_product'];
                 if(!is_array($product)||array_diff(array_keys($product),['name','sku','barcode','price_clp','sale_unit']))fail('Datos del nuevo producto inválidos.',422);
                 $name=requireString($product,'name',120);
@@ -152,6 +155,13 @@ function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
                 $qty=decimalQuantity($spec['quantity'],false,$product['sale_unit']!=='unidad');
                 if((float)$qty<=0)fail('Cantidad debe ser mayor que cero.',422);
                 $prior=(float)$product['stock_qty'];
+                $controlled=serialControlled($db,$biz,$pid);$numbers=$spec['serial_numbers']??[];$serialWarehouse=null;
+                if($controlled){
+                    if($supplierId===null||$product['sale_unit']!=='unidad'||(float)$qty!== (float)count($numbers))throw new HttpError('Para recibir '.$product['name'].' selecciona proveedor y registra una serie por unidad.',422,'serial_numbers');
+                    $serialWarehouse=titoLocalLocationId($db,$biz);
+                    $s=$db->prepare('SELECT id FROM warehouses WHERE id=? AND business_id=? AND is_active=1');$s->execute([$serialWarehouse,$biz]);if(!$s->fetchColumn())fail('La bodega local está inactiva.',409);
+                    serialReconcile($db,$biz,$pid,$prior);
+                }elseif(array_key_exists('serial_numbers',$spec))fail('Activa el control de serie para este producto antes de recibir series.',422);
                 $after=$prior+(float)$qty;
                 if(!is_finite($after)||$after>1000000000)fail('Stock excede el máximo permitido.',422);
                 $previous=number_format($prior,3,'.','');
@@ -161,6 +171,7 @@ function registerGoodsReceiptRoutes(RouteCollectorProxy $group): void {
                 if($total>1000000000000)fail('Recepción demasiado grande.',422);
                 $upd->execute([$balance,$pid,$biz]);
                 $insert->execute([$receiptId,$pid,$product['name'],$qty,$spec['unit_cost_clp'],$line,$previous,$balance]);
+                if($controlled){serialReceive($db,$admin,$pid,$receiptId,$supplierId,$serialWarehouse,$spec['unit_cost_clp'],$date,$numbers);serialReconcile($db,$biz,$pid,$after);}
                 receiptSupplierAssociate($db,$biz,$pid,$supplierId);
                 move($db,$biz,$pid,null,$uid,'receipt',$qty,$balance,mb_substr('Recepción #'.$receiptId.' · '.$supplier,0,250));
             }

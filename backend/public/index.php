@@ -17,6 +17,7 @@ require __DIR__ . '/../private/access_roles.php';
 require __DIR__ . '/../private/organization.php';
 require __DIR__ . '/../private/sales_points.php';
 require __DIR__ . '/../private/origin_catalog.php';
+require __DIR__ . '/../private/serials.php';
 require __DIR__ . '/../private/platform.php';
 require __DIR__ . '/../private/catalog_maintenance.php';
 require __DIR__ . '/../private/receipts.php';
@@ -146,7 +147,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
     });
     $group->get('/products',static function(Request $request,Response $response): Response {
         $biz=(int)$request->getAttribute('currentUser')['business_id'];
-        $st=db()->prepare('SELECT id,name,sku,barcode,price_clp,sale_unit,stock_qty,is_active FROM products WHERE business_id=? AND is_active=1 ORDER BY name,id LIMIT 1000');
+        $st=db()->prepare('SELECT p.id,p.name,p.sku,p.barcode,p.price_clp,p.sale_unit,p.stock_qty,p.is_active,(c.product_id IS NOT NULL) AS serial_control FROM products p LEFT JOIN serial_product_controls c ON c.product_id=p.id AND c.business_id=p.business_id WHERE p.business_id=? AND p.is_active=1 ORDER BY p.name,p.id LIMIT 1000');
         $st->execute([$biz]);
         return respond($response,['products'=>$st->fetchAll()]);
     });
@@ -301,6 +302,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
             if((float)$delta===0.0)fail('El ajuste no puede ser cero.',422);
             $next=(float)$product['stock_qty']+(float)$delta;
             if($next< -0.00001 || $next>1000000000)fail('Stock resultante inválido.',422);
+            serialRejectLegacy($db,$biz,$pid);
             if((float)$delta<0)titoCheckStoreStock($db,$biz,$pid,abs((float)$delta),$product['name']);
             $balance=number_format(max(0,$next),3,'.','');
             $st=$db->prepare('UPDATE products SET stock_qty=? WHERE id=? AND business_id=?');
@@ -315,6 +317,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
     registerOrganizationRoutes($group);
     registerSalesPointRoutes($group);
     registerOriginCatalogRoutes($group);
+    registerSerialRoutes($group);
     registerCatalogMaintenanceRoutes($group);
     registerGoodsReceiptRoutes($group);
     registerInventoryReportRoutes($group);

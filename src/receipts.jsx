@@ -41,7 +41,7 @@ export default function ReceiptsPanel({products,request,onChange,notify}){
   function add(p){
     if(locked)return;
     if(lines.length>=80){notify('Máximo 80 productos por recepción.','error');return;}
-    setLines(a=>[...a,{line_key:'existing-'+p.id,product_id:Number(p.id),product:p,quantity:'1',unit_cost_clp:''}]);
+    setLines(a=>[...a,{line_key:'existing-'+p.id,product_id:Number(p.id),product:p,quantity:'1',unit_cost_clp:'',serialText:''}]);
     setSearch('');
   }
   function addNew(e){
@@ -102,9 +102,12 @@ export default function ReceiptsPanel({products,request,onChange,notify}){
       if(line.unit_cost_clp===''||!Number.isInteger(cost)||cost<0||cost>1000000000){
         notify('Revisa el costo unitario de '+(line.new_product?.name||line.product.name)+'.','error');return;
       }
+      const serials=String(line.serialText||'').split(/\r?\n/).map(s=>s.trim().toUpperCase()).filter(Boolean);
+      const controlled=!line.new_product&&Number(line.product.serial_control)===1;
+      if(controlled&&(serials.length!==qty||serials.length>500||new Set(serials).size!==serials.length)){notify('Ingresa una serie distinta por unidad de '+line.product.name+' (máximo 500).','error');return;}
       items.push({
         ...(line.new_product?{new_product:line.new_product}:{product_id:line.product_id}),
-        quantity:qty,unit_cost_clp:cost
+        quantity:qty,unit_cost_clp:cost,...(controlled?{serial_numbers:serials}:{})
       });
     }
     const body={request_id:newId(),supplier_id:s,document_type:docType,document_number:doc||null,received_at:date,items};
@@ -152,6 +155,7 @@ export default function ReceiptsPanel({products,request,onChange,notify}){
             <div className="receipt-item-values">
               <label>Cantidad ({unit})<input type="number" required min={unit==='unidad'?'1':'0.001'} step={unit==='unidad'?'1':'0.001'} max="1000000000" value={l.quantity} disabled={locked} onChange={e=>change(l.line_key,'quantity',e.target.value)}/></label>
               <label>Costo unitario (CLP)<input type="number" required min="0" step="1" max="1000000000" placeholder="0" value={l.unit_cost_clp} disabled={locked} onChange={e=>change(l.line_key,'unit_cost_clp',e.target.value)}/></label>
+              {!np&&Number(l.product.serial_control)===1&&<label>Números de serie (uno por línea)<textarea rows={4} value={l.serialText||''} disabled={locked} onChange={e=>change(l.line_key,'serialText',e.target.value)} placeholder="SERIE-001"/><small className="helper">Debe coincidir con la cantidad recibida. Ingreso a la bodega local.</small></label>}
               <div className="receipt-line-total"><small>Subtotal</small><strong>{pesos(Number(l.quantity)*Number(l.unit_cost_clp))}</strong></div>
             </div>
           </div>;
@@ -181,7 +185,7 @@ export default function ReceiptsPanel({products,request,onChange,notify}){
     </div></div>}
     {selected&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setSelected(null);}}><div className="modal" role="dialog" aria-modal="true" aria-label="Detalle de recepción"><div className="modal-head"><h3>Recepción #{selected.receipt.id}</h3><button type="button" className="ghost close" onClick={()=>setSelected(null)} aria-label="Cerrar">×</button></div>
       <div className="receipt-detail-meta"><p><strong>Proveedor:</strong> {selected.receipt.supplier_name}{selected.receipt.supplier_tax_id?' · '+selected.receipt.supplier_tax_id:''} <small>({selected.receipt.supplier_id?'Vinculado':'Registro heredado'})</small></p><p><strong>Fecha:</strong> {selected.receipt.received_at}</p><p><strong>Documento:</strong> {selected.receipt.document_type==='sin_documento'?'Sin documento':selected.receipt.document_type+' '+selected.receipt.document_number}</p><p><strong>Registró:</strong> {selected.receipt.entered_by_email}</p></div>
-      <div className="table-wrap"><table><thead><tr><th>Producto</th><th>Cantidad</th><th>Costo</th><th>Stock antes</th><th>Stock después</th></tr></thead><tbody>{selected.items.map(i=><tr key={i.id}><td><strong>{i.product_name_snapshot}</strong><small className="sub">{i.sku||''}</small></td><td>{qtyFormat(i.quantity)}</td><td>{pesos(i.unit_cost_clp)}</td><td>{qtyFormat(i.stock_before)}</td><td>{qtyFormat(i.stock_after)}</td></tr>)}</tbody></table></div>
+      <div className="table-wrap"><table><thead><tr><th>Producto</th><th>Cantidad</th><th>Costo</th><th>Stock antes</th><th>Stock después</th></tr></thead><tbody>{selected.items.map(i=><tr key={i.id}><td><strong>{i.product_name_snapshot}</strong><small className="sub">{i.sku||''}</small>{i.serial_numbers?.length>0&&<small className="sub">Series: {i.serial_numbers.join(', ')}</small>}</td><td>{qtyFormat(i.quantity)}</td><td>{pesos(i.unit_cost_clp)}</td><td>{qtyFormat(i.stock_before)}</td><td>{qtyFormat(i.stock_after)}</td></tr>)}</tbody></table></div>
       <div className="receipt-total"><span>Total registrado</span><strong>{pesos(selected.receipt.total_cost_clp)}</strong></div>
     </div></div>}
   </div>;

@@ -119,6 +119,7 @@ function titoApplyLocationStock(PDO $db,int $biz,int $pid,int $warehouseId,float
     $p=$db->prepare('SELECT stock_qty FROM products WHERE id=? AND business_id=? FOR UPDATE');
     $p->execute([$pid,$biz]);$global=$p->fetchColumn();$p->closeCursor();
     if($global===false)fail('Producto ajeno a la empresa o inexistente.',404);
+    serialRejectLegacy($db,$biz,$pid);
     $st=$db->prepare('SELECT ws.warehouse_id,ws.qty,w.code,w.business_id FROM warehouse_stocks ws JOIN warehouses w ON w.id=ws.warehouse_id AND w.business_id=ws.business_id WHERE ws.product_id=? AND ws.business_id=? ORDER BY ws.warehouse_id FOR UPDATE');
     $st->execute([$pid,$biz]);$rows=$st->fetchAll();$st->closeCursor();
     $balances=[];$localId=null;$sum=0.0;
@@ -459,6 +460,7 @@ function registerWarehouseRoutes(RouteCollectorProxy $group): void {
             foreach($specs as $pid=>$qtyRaw){
                 $pLock->execute([$pid,$biz]);$p=$pLock->fetch();$pLock->closeCursor();
                 if(!$p)fail('Producto no disponible: '.$pid,422);
+                serialRejectLegacy($db,$biz,$pid);
                 $qty=decimalQuantity($qtyRaw,false,$p['sale_unit']!=='unidad');
                 if((float)$qty<=0)fail('La cantidad debe ser positiva.',422);
                 $bal->execute([$biz,$pid,$source,$target]);

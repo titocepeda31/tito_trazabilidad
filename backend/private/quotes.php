@@ -23,7 +23,9 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
         return respond($response,['quote'=>$quote,'items'=>$st->fetchAll()]);
     });
     $group->post('/quotes',static function(Request $request,Response $response): Response {
-        $admin=adminOnly($request);
+        $admin=accessRequire($request,'quotes.create');
+        $limited=$admin['role']!=='admin';
+        if($limited&&(!in_array('inventory.view',$admin['permissions'],true)||!in_array('quotes.view',$admin['permissions'],true)||$admin['branch_scope']!=='all'))fail('No tienes permisos para crear cotizaciones.',403);
         $biz=(int)$admin['business_id'];$uid=(int)$admin['id'];$b=requestBody($request);
         if(array_diff(array_keys($b),['request_id','customer_name','customer_contact','valid_until','notes','items']))fail('Campos no permitidos.',422);
         $rid=$b['request_id']??null;
@@ -70,6 +72,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
                 if((float)$q<=0)fail('Cantidad inválida.',422);
                 $list=(int)$p['price_clp'];
                 $price=$item['unit_price_clp']===null?$list:$item['unit_price_clp'];
+                if($limited&&($price!==$list||$item['discount_reason']!==null))fail('Tu rol solo permite cotizar a precio de lista.',403);
                 if($price>$list)fail('El precio pactado no puede superar la lista.',422);
                 if($price===0&&$list>0)fail('El precio pactado debe superar cero.',422);
                 $reason=null;
@@ -89,9 +92,10 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
         }catch(Throwable $e){
             if($db->inTransaction())$db->rollBack();
             if($e instanceof PDOException&&(int)($e->errorInfo[1]??0)===1062){
-                $st=$db->prepare('SELECT id,total_clp,payload_hash FROM quotes WHERE business_id=? AND request_id=?');
+                $st=$db->prepare('SELECT id,total_clp,payload_hash,created_by FROM quotes WHERE business_id=? AND request_id=?');
                 $st->execute([$biz,strtolower($rid)]);$prior=$st->fetch();
                 if($prior){
+                    if($limited&&(int)$prior['created_by']!==$uid)fail('Solicitud reutilizada.',409);
                     if(!hash_equals((string)$prior['payload_hash'],$hash))fail('Solicitud reutilizada con datos diferentes.',409);
                     return respond($response,['ok'=>true,'quote_id'=>(int)$prior['id'],'total_clp'=>(int)$prior['total_clp'],'already_recorded'=>true],200);
                 }

@@ -333,8 +333,8 @@ function registerWarehouseRoutes(RouteCollectorProxy $group): void {
         $b=requestBody($request);
         if(array_diff(array_keys($b),['name','type']))fail('Campos no permitidos.',422);
         $name=requireString($b,'name',120);
-        $type=$b['type']??null;
-        if(!in_array($type,['sales','storage'],true))fail('Selecciona local de venta o bodega.',422);
+        $type=$b['type']??'storage';
+        if($type!=='storage')fail('Este módulo solo permite crear ubicaciones de inventario.',422);
         $db=db();
         try {
             $db->beginTransaction();
@@ -349,7 +349,7 @@ function registerWarehouseRoutes(RouteCollectorProxy $group): void {
             if($st->fetchColumn())fail('Ya existe una ubicación con ese nombre.',409);
             $code='ub_'.bin2hex(random_bytes(10));
             $st=$db->prepare('INSERT INTO warehouses(business_id,code,name,is_sales_location,is_active) VALUES(?,?,?,?,1)');
-            $st->execute([$biz,$code,$name,$type==='sales'?1:0]);
+            $st->execute([$biz,$code,$name,0]);
             $warehouseId=(int)$db->lastInsertId();
             // Los productos anteriores comienzan con cero en la nueva ubicación.
             // Las altas simultáneas están cubiertas por el trigger de products.
@@ -359,7 +359,7 @@ function registerWarehouseRoutes(RouteCollectorProxy $group): void {
             $st->execute([$warehouseId,$biz,$biz]);
             if((int)$st->fetchColumn()!==0)throw new RuntimeException('No se crearon todos los saldos iniciales.');
             $db->commit();
-            return respond($response,['ok'=>true,'warehouse'=>['id'=>$warehouseId,'code'=>$code,'name'=>$name,'is_sales_location'=>$type==='sales'?1:0,'is_active'=>1],'sales_enabled'=>true],201);
+            return respond($response,['ok'=>true,'warehouse'=>['id'=>$warehouseId,'code'=>$code,'name'=>$name,'is_sales_location'=>0,'is_active'=>1],'sales_enabled'=>false],201);
         }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
     });
     $group->get('/warehouses/stock',static function(Request $request,Response $response): Response {

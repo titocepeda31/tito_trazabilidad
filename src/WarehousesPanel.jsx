@@ -40,7 +40,6 @@ export default function WarehousesPanel({request,notify,onChange}){
   const [busy,setBusy]=useState(false);
   const [creating,setCreating]=useState(false);
   const [locationName,setLocationName]=useState('');
-  const [locationType,setLocationType]=useState('storage');
   const [pending,setPending]=useState(()=>{try{return JSON.parse(sessionStorage.getItem(pendingKey)||'null');}catch{return null;}});
   const locked=busy||Boolean(pending);
   const from=warehouses.find(w=>String(w.id)===source);
@@ -91,13 +90,13 @@ export default function WarehousesPanel({request,notify,onChange}){
   async function createLocation(e){
     e.preventDefault();
     if(locked||creating)return;
-    if(locationName.trim().length<2){notify('Indica el nombre del local o bodega.','error');return;}
-    if(!window.confirm('Crear '+locationName.trim()+' con stock inicial en cero? Asigna un cajero a la sucursal desde Usuarios para habilitar su caja.'))return;
+    if(locationName.trim().length<2){notify('Indica el nombre de la ubicación de inventario.','error');return;}
+    if(!window.confirm('Crear '+locationName.trim()+' con stock inicial en cero?'))return;
     setCreating(true);
     try{
-      await request('/warehouses',{method:'POST',body:{name:locationName.trim(),type:locationType}});
-      setLocationName('');setLocationType('storage');
-      notify('Ubicación creada con stock en cero. Puedes trasladar mercadería; las cajas multisucursal se habilitarán en la siguiente etapa.','success');
+      await request('/warehouses',{method:'POST',body:{name:locationName.trim(),type:'storage'}});
+      setLocationName('');
+      notify('Ubicación creada con stock en cero. Puedes trasladar mercadería entre ubicaciones.','success');
       await load();
     }catch(err){notify('No se pudo crear la ubicación: '+err.message,'error');}
     finally{setCreating(false);}
@@ -120,18 +119,17 @@ export default function WarehousesPanel({request,notify,onChange}){
     sessionStorage.setItem(pendingKey,JSON.stringify(body));setPending(body);send(body);
   }
   return <div className="warehouses-page">
-    <div className="section-intro"><div><p className="eyebrow">INVENTARIO FÍSICO</p><h2>Sucursales, bodegas y traslados</h2><p className="muted">Un catálogo, varias ubicaciones. Por ahora las ventas se mantienen en el local original.</p></div></div>
+    <div className="section-intro"><div><p className="eyebrow">INVENTARIO FÍSICO</p><h2>Bodegas y ubicaciones de inventario</h2><p className="muted">Controla existencias físicas y traslados de mercadería entre ubicaciones.</p></div></div>
     <section className="panel pad">
-      <h3>Agregar local o bodega</h3>
-      <p className="helper">Esta etapa permite crear ubicaciones y distribuir existencias. Para vender desde una sucursal, primero asigna sus cajeros en Usuarios. Todas las ubicaciones nuevas comienzan con stock cero.</p>
+      <h3>Agregar ubicación de inventario</h3>
+      <p className="helper">Registra bodegas, depósitos u otras ubicaciones físicas de mercadería. Las nuevas ubicaciones comienzan con stock cero. Las sucursales se administran en Empresas y sucursales.</p>
       <form className="formstack" onSubmit={createLocation}>
-        <label>Nombre de la ubicación<input value={locationName} maxLength="120" required disabled={locked||creating} onChange={e=>setLocationName(e.target.value)} placeholder="Ej. Sucursal Norte"/></label>
-        <label>Tipo<select value={locationType} disabled={locked||creating} onChange={e=>setLocationType(e.target.value)}><option value="storage">Bodega</option><option value="sales">Sucursal de venta</option></select></label>
+        <label>Nombre de la ubicación<input value={locationName} maxLength="120" required disabled={locked||creating} onChange={e=>setLocationName(e.target.value)} placeholder="Ej. Bodega central"/></label>
         <button className="primary" type="submit" disabled={locked||creating}>{creating?'Creando…':'+ Crear ubicación'}</button>
       </form>
     </section>
     <div className="warehouse-cards">
-      {warehouses.map(w=><div className="panel pad warehouse-card" key={w.id}><div className="warehouse-icon">{Number(w.is_sales_location)===1?'▣':'▤'}</div><div><strong>{w.name}</strong><p className="muted">{Number(w.is_sales_location)===1?(w.code==='local'?'Local de venta activo':'Sucursal de venta'):'Bodega'}</p></div><div className="warehouse-sum">{stocks.filter(p=>qtyAt(p,w)>0).length}<small>productos con existencias</small></div></div>)}
+      {warehouses.map(w=><div className="panel pad warehouse-card" key={w.id}><div className="warehouse-icon">▤</div><div><strong>{w.name}</strong><p className="muted">Ubicación de inventario</p></div><div className="warehouse-sum">{stocks.filter(p=>qtyAt(p,w)>0).length}<small>productos con existencias</small></div></div>)}
     </div>
     <p className="helper warehouse-explainer">El resumen cuenta productos con existencias por ubicación. Cada ubicación nueva empieza en cero y recibe productos mediante traslados, sin modificar el stock total de la empresa.</p>
     <section className="panel pad warehouse-transfer">
@@ -150,7 +148,7 @@ export default function WarehousesPanel({request,notify,onChange}){
     </section>
     <section className="panel warehouse-section warehouse-stock-section">
       <div className="panel-heading warehouse-section-heading">
-        <div><h3>Existencias por ubicación</h3><p>Consulta cuánto hay en el local, en bodega y en toda la empresa.</p></div>
+        <div><h3>Existencias por ubicación</h3><p>Consulta las existencias de cada ubicación y el stock total de la empresa.</p></div>
       </div>
       <div className="warehouse-table-toolbar">
         <label>Buscar producto
@@ -169,7 +167,7 @@ export default function WarehousesPanel({request,notify,onChange}){
     </section>
     <section className="panel warehouse-section warehouse-transfers-section">
       <div className="panel-heading warehouse-section-heading">
-        <div><h3>Historial de traslados</h3><p>Revisa movimientos registrados entre el local y la bodega de respaldo.</p></div>
+        <div><h3>Historial de traslados</h3><p>Revisa movimientos registrados entre ubicaciones de inventario.</p></div>
       </div>
       <div className="warehouse-table-toolbar">
         <label>Buscar traslado

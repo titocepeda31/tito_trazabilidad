@@ -15,6 +15,7 @@ import WarehousesPanel from './WarehousesPanel.jsx';
 import AccountPanel from './AccountPanel.jsx';
 import OrganizationPanel from './OrganizationPanel.jsx';
 import SalesPointsPanel from './SalesPointsPanel.jsx';
+import OriginCatalogPanel from './OriginCatalogPanel.jsx';
 import PlatformPanel from './PlatformPanel.jsx';
 import RolesPanel from './RolesPanel.jsx';
 import RestrictedWorkspace from './RestrictedWorkspace.jsx';
@@ -53,6 +54,7 @@ const menu = [
   { key: 'aprobaciones', label: 'Autorizaciones', ico: '✓' },
   { key: 'organizacion', label: 'Empresas y sucursales', ico: '▦' },
   { key: 'puntosventa', label: 'Puntos de venta', ico: '▣' },
+  { key: 'origen', label: 'Fabricantes y proveedores', ico: '▧' },
   { key: 'usuarios', label: 'Usuarios', ico: '♙' },
   { key: 'roles', label: 'Roles y permisos', ico: '⚿' },
   { key: 'cuenta', label: 'Mi cuenta', ico: '♙' }
@@ -261,7 +263,7 @@ function App() {
   const pendingApprovals=approvalRequests.filter(r=>r.status==='pending').length;
   const canApproveDiscounts=isAdmin||staffPermissions.can_approve_discounts;
   const canSellCredit=isAdmin||staffPermissions.can_sell_credit;
-  const visibleMenu = isAdmin ? menu : menu.filter(m => !['importar','usuarios','recepciones','cotizaciones','bodegas','devoluciones','clientes','organizacion','roles','puntosventa'].includes(m.key) && (m.key!=='aprobaciones'||canApproveDiscounts));
+  const visibleMenu = isAdmin ? menu : menu.filter(m => !['importar','usuarios','recepciones','cotizaciones','bodegas','devoluciones','clientes','organizacion','roles','puntosventa','origen'].includes(m.key) && (m.key!=='aprobaciones'||canApproveDiscounts));
   const critical = products.filter(p => Number(p.stock_qty) <= 5);
   const stockValue = products.reduce((total,p) => total + Number(p.stock_qty) * Number(p.price_clp), 0);
   const dateCL = d => d.toLocaleDateString('sv-SE', {timeZone:'America/Santiago'});
@@ -322,6 +324,7 @@ function App() {
         <div style={{display:page==='vender'&&salesScreenReady?'contents':'none'}}>{terminalCanSell&&cashCanSell&&<SellPanel key={'terminal-'+terminalVersion+'-'+terminalStatus.terminal.id+'-'+cashStatus.session.id} products={products} request={request} refresh={()=>refresh(false)} notify={notify} canDiscount={isAdmin} canApproveDiscount={canApproveDiscounts} canRegisterCredit={canSellCredit} isAdmin={isAdmin} terminalStatus={terminalStatus} cashStatus={cashStatus} onCashChanged={async()=>{try{setCashStatus(await api('/cash/current',{token}));}catch{setCashStatus(null);}}} onOpenCash={()=>setPage('caja')} onShowSales={()=>setPage('ventas')} businessName={user?.business_name||'Tito POS'} active={page==='vender'} newSaleRequest={newSaleRequest} />}</div>
         {page==='organizacion' && isAdmin && <OrganizationPanel request={request} notify={notify} />}
         {page==='puntosventa' && isAdmin && <SalesPointsPanel request={request}/>}
+        {page==='origen' && isAdmin && <OriginCatalogPanel request={request}/>}
         {page==='usuarios' && isAdmin && <UsersPanel request={request} notify={notify} ownId={Number(user?.id)} />}
         {page==='roles' && isAdmin && <RolesPanel request={request} />}
         {page==='cuenta' && <AccountPanel user={user} request={request} notify={notify} onPasswordChanged={()=>{endSession();setPage('inicio');notify('Contraseña actualizada. Inicia sesión nuevamente.','success');}} />}

@@ -412,6 +412,7 @@ function registerWarehouseRoutes(RouteCollectorProxy $group): void {
         $indexes=[];
         foreach($stocks as $index=>$product){
             $stocks[$index]['locations']=[];
+            $stocks[$index]['reserved_locations']=[];
             $indexes[(int)$product['product_id']]=$index;
         }
         if($indexes){
@@ -424,6 +425,10 @@ function registerWarehouseRoutes(RouteCollectorProxy $group): void {
                 $index=$indexes[(int)$row['product_id']];
                 $stocks[$index]['locations'][(string)$row['warehouse_id']]=(float)$row['qty'];
             }
+        }
+        if($indexes){
+            $r=db()->prepare("SELECT i.product_id,r.warehouse_id,SUM(i.quantity) AS qty FROM serial_reservation_items i JOIN serial_reservations r ON r.id=i.reservation_id AND r.business_id=i.business_id WHERE i.business_id=? AND r.status='pending' GROUP BY i.product_id,r.warehouse_id");$r->execute([$biz]);
+            foreach($r->fetchAll() as $row)if(isset($indexes[(int)$row['product_id']]))$stocks[$indexes[(int)$row['product_id']]]['reserved_locations'][(string)$row['warehouse_id']]=(int)$row['qty'];
         }
         return respond($response,['stocks'=>$stocks]);
     });
@@ -500,6 +505,7 @@ function registerWarehouseRoutes(RouteCollectorProxy $group): void {
                 foreach($rows as $row)$stocks[(int)$row['warehouse_id']]=(float)$row['qty'];
                 if(count($stocks)!==2)fail('Stock por ubicación incompleto para '.$p['name'],409);
                 if($stocks[$source]+0.00001<(float)$qty)fail('Stock insuficiente en bodega de origen para '.$p['name'],409);
+                if($controlled)serialRequireFree($db,$biz,$pid,$source,(float)$qty);
                 $from=number_format(max(0,$stocks[$source]-(float)$qty),3,'.','');
                 $to=number_format($stocks[$target]+(float)$qty,3,'.','');
                 if((float)$to>1000000000)fail('Stock destino fuera de rango.',422);

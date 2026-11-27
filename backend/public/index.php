@@ -18,6 +18,7 @@ require __DIR__ . '/../private/organization.php';
 require __DIR__ . '/../private/sales_points.php';
 require __DIR__ . '/../private/origin_catalog.php';
 require __DIR__ . '/../private/serials.php';
+require __DIR__ . '/../private/reservations.php';
 require __DIR__ . '/../private/platform.php';
 require __DIR__ . '/../private/catalog_maintenance.php';
 require __DIR__ . '/../private/receipts.php';
@@ -224,12 +225,15 @@ $app->group('', static function(RouteCollectorProxy $group): void {
         }
         ksort($wanted,SORT_NUMERIC);
         $hasSerial=false;foreach($wanted as $spec)if(array_key_exists('serial_numbers',$spec))$hasSerial=true;
+        $reservationId=array_key_exists('reservation_id',$b)?reservationId($b['reservation_id']):null;
+        if($reservationId!==null&&!$hasSerial)fail('La reserva requiere series para despachar.',422);
         $clientId=null;$serialHash=null;
         if($hasSerial){
             $clientId=originId($b['serial_client_id']??null,'serial_client_id');
             if($clientId===null)throw new HttpError('Selecciona el cliente para la venta de equipos.',422,'serial_client_id');
             if(isset($b['discount_approval_token'])||isset($b['discount_request_id']))fail('La autorización de descuentos en ventas por serie queda pendiente de integración.',422);
-            $serialHash=hash('sha256',json_encode([$uid,$payment,$b['warehouse_id']??null,$clientId,$wanted],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
+            $canonical=[$uid,$payment,$b['warehouse_id']??null,$clientId,$wanted];if($reservationId!==null)$canonical[]=$reservationId;
+            $serialHash=hash('sha256',json_encode($canonical,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
         }elseif(array_key_exists('serial_client_id',$b))fail('Cliente serializado sin series.',422);
         $db=db();
         try{
@@ -243,6 +247,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
             $clientName=null;
             if($hasSerial){$c=$db->prepare('SELECT name FROM habitual_clients WHERE business_id=? AND id=? AND is_active=1 FOR UPDATE');$c->execute([$biz,$clientId]);$clientName=$c->fetchColumn();$c->closeCursor();if($clientName===false)throw new HttpError('Cliente activo no encontrado.',422,'serial_client_id');}
             $saleLocation=titoSaleLocation($db,$user,$b['warehouse_id']??null,true,$request);
+            if($reservationId!==null)reservationLockForSale($db,$biz,$reservationId,$clientId,$saleLocation,$wanted);
             $cashSessionId=titoCashSessionForSale($db,$user,$saleLocation);
             $st=$db->prepare('INSERT INTO sales(business_id,sold_by,request_id,payment_method,total_clp,warehouse_id,cash_session_id) VALUES (?,?,?,?,0,?,?)');
             $st->execute([$biz,$uid,$requestId,$payment,$saleLocation,$cashSessionId]);
@@ -290,6 +295,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
                 if($controlled){
                     if(!$hasSerial||$product['sale_unit']!=='unidad'||(float)$qty!==(float)count($numbers))throw new HttpError('Selecciona una serie disponible por unidad de '.$product['name'].'.',422,'serial_numbers');
                     serialReconcile($db,$biz,$id,(float)$product['stock_qty']);
+                    serialRequireFree($db,$biz,$id,$saleLocation,(float)$qty,$reservationId);
                     $next=titoSellSerialLocationStock($db,$biz,$id,$saleLocation,(float)$qty);
                 }else{
                     if(array_key_exists('serial_numbers',$spec))fail('El producto no tiene control de series.',422);
@@ -303,6 +309,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
             $st=$db->prepare('UPDATE sales SET total_clp=? WHERE id=? AND business_id=?');
             $st->execute([$total,$saleId,$biz]);
             titoCashRegisterSale($db,$biz,$uid,$cashSessionId,$saleId,$requestId,$total,$payment);
+            if($reservationId!==null)reservationComplete($db,$biz,$reservationId,$saleId,$uid);
             $db->commit();
             return respond($response,['ok'=>true,'sale_id'=>$saleId,'total_clp'=>$total,'warehouse_id'=>$saleLocation],201);
         }catch(Throwable $e){
@@ -346,6 +353,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
     registerSalesPointRoutes($group);
     registerOriginCatalogRoutes($group);
     registerSerialRoutes($group);
+    registerReservationRoutes($group);
     registerCatalogMaintenanceRoutes($group);
     registerGoodsReceiptRoutes($group);
     registerInventoryReportRoutes($group);

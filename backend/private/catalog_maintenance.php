@@ -51,21 +51,23 @@ function registerCatalogMaintenanceRoutes(RouteCollectorProxy $group): void {
         $admin=adminOnly($request);
         $biz=(int)$admin['business_id'];$uid=(int)$admin['id'];$id=(int)$args['id'];
         $b=requestBody($request);
-        if(array_diff(array_keys($b),['reason']))fail('Campos no permitidos.',422);
+        if(array_diff(array_keys($b),['reason','serial_inspection_confirmed']))fail('Campos no permitidos.',422);
         $reason=requireString($b,'reason',250);
         if(mb_strlen($reason)<5)fail('Indica un motivo de al menos 5 caracteres.',422);
         $db=db();
         try{
-            $db->beginTransaction();
+            $db->beginTransaction();originLockCompany($db,$biz);
             $st=$db->prepare('SELECT id,status,warehouse_id FROM sales WHERE id=? AND business_id=? FOR UPDATE');
             $st->execute([$id,$biz]);$sale=$st->fetch();$st->closeCursor();
             if(!$sale)fail('Venta no encontrada.',404);
             if($sale['status']!=='completed')fail('Esta venta ya fue anulada.',409);
+            $check=$db->prepare('SELECT id FROM customer_returns WHERE business_id=? AND sale_id=? LIMIT 1');$check->execute([$biz,$id]);if($check->fetchColumn())fail('Venta con devoluciones previas; no se puede anular íntegramente.',409);$check->closeCursor();
+            $check=$db->prepare('SELECT id FROM credit_accounts WHERE business_id=? AND sale_id=? LIMIT 1');$check->execute([$biz,$id]);if($check->fetchColumn())fail('Anula esta venta mediante el módulo de cuentas por cobrar.',409);$check->closeCursor();
             $saleLocation=$sale['warehouse_id']===null?titoLocalLocationId($db,$biz):(int)$sale['warehouse_id'];
-            $st=$db->prepare('SELECT product_id,quantity FROM sale_items WHERE sale_id=? ORDER BY product_id,id');
+            $st=$db->prepare('SELECT id,product_id,quantity FROM sale_items WHERE sale_id=? ORDER BY product_id,id');
             $st->execute([$id]);$items=$st->fetchAll();$st->closeCursor();
             if(!$items)fail('Esta venta no tiene productos.',409);
-            $lock=$db->prepare('SELECT stock_qty FROM products WHERE id=? AND business_id=? FOR UPDATE');
+            $lock=$db->prepare('SELECT stock_qty,is_active,sale_unit FROM products WHERE id=? AND business_id=? FOR UPDATE');
             foreach($items as $item){
                 $pid=(int)$item['product_id'];$qty=(float)$item['quantity'];
                 if(!is_finite($qty)||$qty<=0)fail('Cantidad histórica de venta inválida.',409);
@@ -74,7 +76,16 @@ function registerCatalogMaintenanceRoutes(RouteCollectorProxy $group): void {
                 $next=(float)$product['stock_qty']+$qty;
                 if(!is_finite($next)||$next>1000000000)fail('El stock resultante supera el máximo permitido.',409);
                 $balance=number_format($next,3,'.','');
-                $balance=titoApplyLocationStock($db,$biz,$pid,$saleLocation,$qty);
+                $units=serialSaleLineUnits($db,$biz,$id,(int)$item['id']);
+                if($units){
+                    if(($b['serial_inspection_confirmed']??false)!==true)fail('Confirma recepción física y buen estado de todas las series vendidas.',422);
+                    if((int)$product['is_active']!==1||$product['sale_unit']!=='unidad'||!serialControlled($db,$biz,$pid)||(float)count($units)!==$qty)fail('Inventario serializado no válido para anulación.',409);
+                    serialReconcile($db,$biz,$pid,(float)$product['stock_qty']);
+                    $numbers=array_column($units,'serial_number');
+                    serialRestoreUnits($db,$admin,$id,(int)$item['id'],$pid,$saleLocation,$numbers,'void',null,$reason);
+                    $balance=titoRestoreSerialLocationStock($db,$biz,$pid,$saleLocation,$qty);
+                    serialReconcile($db,$biz,$pid,(float)$balance);
+                }else $balance=titoApplyLocationStock($db,$biz,$pid,$saleLocation,$qty);
                 move($db,$biz,$pid,$id,$uid,'reversal',number_format($qty,3,'.',''),$balance,mb_substr('Anulación venta #'.$id.': '.$reason,0,250));
             }
             $st=$db->prepare("UPDATE sales SET status='voided',voided_by=?,voided_at=UTC_TIMESTAMP(),void_reason=? WHERE id=? AND business_id=? AND status='completed'");

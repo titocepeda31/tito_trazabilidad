@@ -124,6 +124,10 @@ function titoSellSerialLocationStock(PDO $db,int $biz,int $pid,int $warehouseId,
     if($quantity<=0)fail('Cantidad vendida inválida.',422);
     return titoApplyLocationStockCore($db,$biz,$pid,$warehouseId,-$quantity,'sale');
 }
+function titoRestoreSerialLocationStock(PDO $db,int $biz,int $pid,int $warehouseId,float $quantity): string {
+    if($quantity<=0)fail('Cantidad devuelta inválida.',422);
+    return titoApplyLocationStockCore($db,$biz,$pid,$warehouseId,$quantity,'return');
+}
 function titoApplyLocationStockCore(PDO $db,int $biz,int $pid,int $warehouseId,float $delta,string $mode): string {
     if(!$db->inTransaction())throw new RuntimeException('Se requiere transacción de inventario.');
     if(!is_finite($delta)||abs($delta)<0.0005||abs($delta)>1000000000
@@ -131,8 +135,8 @@ function titoApplyLocationStockCore(PDO $db,int $biz,int $pid,int $warehouseId,f
     $p=$db->prepare('SELECT stock_qty FROM products WHERE id=? AND business_id=? FOR UPDATE');
     $p->execute([$pid,$biz]);$global=$p->fetchColumn();$p->closeCursor();
     if($global===false)fail('Producto ajeno a la empresa o inexistente.',404);
-    if($mode==='receipt'||$mode==='sale'){
-        if(($mode==='receipt'&&$delta<=0)||($mode==='sale'&&$delta>=0)||!serialControlled($db,$biz,$pid))fail('Movimiento serializado inválido.',409);
+    if(in_array($mode,['receipt','return','sale'],true)){
+        if(($mode!=='sale'&&$delta<=0)||($mode==='sale'&&$delta>=0)||!serialControlled($db,$biz,$pid))fail('Movimiento serializado inválido.',409);
     }elseif($mode==='legacy')serialRejectLegacy($db,$biz,$pid);else throw new RuntimeException('Modo inválido.');
     $st=$db->prepare('SELECT ws.warehouse_id,ws.qty,w.code,w.business_id FROM warehouse_stocks ws JOIN warehouses w ON w.id=ws.warehouse_id AND w.business_id=ws.business_id WHERE ws.product_id=? AND ws.business_id=? ORDER BY ws.warehouse_id FOR UPDATE');
     $st->execute([$pid,$biz]);$rows=$st->fetchAll();$st->closeCursor();

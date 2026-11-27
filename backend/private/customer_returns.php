@@ -20,9 +20,11 @@ function registerCustomerReturnRoutes(RouteCollectorProxy $group): void {
         $st->execute([$saleId,$biz]);$sale=$st->fetch();
         if(!$sale)fail('Venta no encontrada.',404);
         $st=db()->prepare('SELECT si.id AS sale_item_id,si.product_id,si.product_name_snapshot,si.quantity,si.unit_price_clp,si.subtotal_clp,p.sale_unit,COALESCE(SUM(ri.quantity),0) AS returned_qty,COALESCE(SUM(ri.amount_clp),0) AS returned_amount_clp FROM sale_items si JOIN products p ON p.id=si.product_id AND p.business_id=? LEFT JOIN customer_return_items ri ON ri.sale_item_id=si.id WHERE si.sale_id=? GROUP BY si.id,si.product_id,si.product_name_snapshot,si.quantity,si.unit_price_clp,si.subtotal_clp,p.sale_unit ORDER BY si.id');
-        $st->execute([$biz,$saleId]);$items=$st->fetchAll();
+        $st->execute([$biz,$saleId]);$items=$st->fetchAll();$st->closeCursor();
+        foreach($items as &$item)$item['serial_units']=serialSaleLineUnits(db(),$biz,$saleId,(int)$item['sale_item_id']);unset($item);
         $st=db()->prepare('SELECT r.id,r.return_kind,r.item_condition,r.resolution,r.reason,r.amount_clp,r.refund_status,r.refund_method,r.refund_reference,r.created_at,r.refunded_at,u.email AS created_by_email FROM customer_returns r JOIN users u ON u.id=r.created_by AND u.business_id=r.business_id WHERE r.sale_id=? AND r.business_id=? ORDER BY r.id DESC');
-        $st->execute([$saleId,$biz]);$returns=$st->fetchAll();
+        $st->execute([$saleId,$biz]);$returns=$st->fetchAll();$st->closeCursor();
+        $s=db()->prepare('SELECT rr.return_id,x.serial_number FROM serial_sale_reversals rr JOIN serial_units x ON x.id=rr.unit_id AND x.business_id=rr.business_id WHERE rr.business_id=? AND rr.sale_id=? AND rr.return_id IS NOT NULL ORDER BY x.serial_number');$s->execute([$biz,$saleId]);$map=[];foreach($s->fetchAll() as $r)$map[$r['return_id']][]=$r['serial_number'];foreach($returns as &$r)$r['serial_numbers']=$map[$r['id']]??[];unset($r);
         return respond($response,['sale_id'=>$saleId,'sale_status'=>$sale['status'],'items'=>$items,'returns'=>$returns]);
     });
 
@@ -44,9 +46,9 @@ function registerCustomerReturnRoutes(RouteCollectorProxy $group): void {
         if(mb_strlen($reason)<5)fail('Describe el motivo con al menos 5 caracteres.',422);
         $items=$body['items']??null;
         if(!is_array($items)||!array_is_list($items)||count($items)<1||count($items)>80)fail('Selecciona entre 1 y 80 productos.',422);
-        $wanted=[];
+        $wanted=[];$serialSpecs=[];
         foreach($items as $row){
-            if(!is_array($row)||array_diff(array_keys($row),['sale_item_id','quantity']))fail('Producto de devolución no válido.',422);
+            if(!is_array($row)||array_diff(array_keys($row),['sale_item_id','quantity','serial_numbers']))fail('Producto de devolución no válido.',422);
             $lineId=filter_var($row['sale_item_id']??null,FILTER_VALIDATE_INT,['options'=>['min_range'=>1]]);
             if($lineId===false||isset($wanted[$lineId]))fail('Producto repetido o inválido.',422);
             $raw=$row['quantity']??null;
@@ -54,13 +56,15 @@ function registerCustomerReturnRoutes(RouteCollectorProxy $group): void {
             $qty=(float)$raw;
             if(!is_finite($qty)||$qty<=0||$qty>1000000000||abs($qty*1000-round($qty*1000))>0.000001)fail('Cantidad fuera de rango.',422);
             $wanted[$lineId]=number_format($qty,3,'.','');
+            if(array_key_exists('serial_numbers',$row))$serialSpecs[$lineId]=serialNormalizeList($row['serial_numbers']);
         }
         ksort($wanted,SORT_NUMERIC);
         $payload=['sale_id'=>$saleId,'return_kind'=>$kind,'item_condition'=>$condition,'resolution'=>$resolution,'reason'=>$reason,'inspection_confirmed'=>true,'items'=>$wanted];
+        if($serialSpecs){ksort($serialSpecs,SORT_NUMERIC);$payload['serial_numbers']=$serialSpecs;}
         $hash=hash('sha256',json_encode($payload,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
         $db=db();
         try{
-            $db->beginTransaction();
+            $db->beginTransaction();originLockCompany($db,$biz);
             // La fila de la venta serializa devoluciones simultáneas, y también su anulación.
             $st=$db->prepare('SELECT id,status,warehouse_id FROM sales WHERE id=? AND business_id=? FOR UPDATE');
             $st->execute([$saleId,$biz]);$sale=$st->fetch();$st->closeCursor();
@@ -73,6 +77,7 @@ function registerCustomerReturnRoutes(RouteCollectorProxy $group): void {
                 return respond($response,['ok'=>true,'return_id'=>(int)$previous['id'],'amount_clp'=>(int)$previous['amount_clp'],'already_recorded'=>true],200);
             }
             if($sale['status']!=='completed')fail('Solo se pueden devolver productos de ventas vigentes.',409);
+            $credit=$db->prepare('SELECT id FROM credit_accounts WHERE business_id=? AND sale_id=? LIMIT 1');$credit->execute([$biz,$saleId]);if($credit->fetchColumn())fail('Usa la devolución de cuentas por cobrar para esta venta a crédito.',409);$credit->closeCursor();
             $saleLocation=$sale['warehouse_id']===null?titoLocalLocationId($db,$biz):(int)$sale['warehouse_id'];
             $st=$db->prepare('SELECT si.id,si.product_id,si.quantity,si.unit_price_clp,si.subtotal_clp,p.sale_unit,p.is_active,p.stock_qty,p.name FROM sale_items si JOIN products p ON p.id=si.product_id AND p.business_id=? WHERE si.sale_id=? ORDER BY si.id');
             $st->execute([$biz,$saleId]);$saleLines=$st->fetchAll();$st->closeCursor();
@@ -84,7 +89,9 @@ function registerCustomerReturnRoutes(RouteCollectorProxy $group): void {
             foreach($wanted as $lineId=>$rawQty){
                 if(!isset($byId[$lineId]))fail('La línea no pertenece a esta venta.',422);
                 $line=$byId[$lineId];$qty=(float)$rawQty;$original=(float)$line['quantity'];
-                $guard=$db->prepare('SELECT unit_id FROM serial_sale_units WHERE business_id=? AND sale_id=? AND sale_item_id=? LIMIT 1');$guard->execute([$biz,$saleId,$lineId]);if($guard->fetchColumn())fail('Esta devolución requiere identificar las series. Funcionalidad pendiente.',409);
+                $units=serialSaleLineUnits($db,$biz,$saleId,$lineId);$numbers=$serialSpecs[$lineId]??[];
+                if($units){if(count($units)!==(int)$original||$qty!==(float)count($numbers))throw new HttpError('Selecciona una serie por unidad devuelta.',422,'serial_numbers');}
+                elseif(array_key_exists($lineId,$serialSpecs))fail('Esta línea no tiene series registradas.',422);
                 $oldQty=(float)($already[$lineId]['qty']??0);
                 $remaining=$original-$oldQty;
                 if($qty>$remaining+0.000001||$remaining<=0)fail('Cantidad excede lo vendido y todavía no devuelto.',409);
@@ -94,7 +101,7 @@ function registerCustomerReturnRoutes(RouteCollectorProxy $group): void {
                 if($maxAmount<0)fail('Inconsistencia de importes previos.',409);
                 $amount=$qty>=$remaining-0.000001?$maxAmount:
                     min($maxAmount,(int)round($qty*(int)$line['unit_price_clp'],0,PHP_ROUND_HALF_UP));
-                $validated[]=['line'=>$line,'qty'=>$qty,'qty_formatted'=>$rawQty,'amount'=>$amount];
+                $validated[]=['line'=>$line,'qty'=>$qty,'qty_formatted'=>$rawQty,'amount'=>$amount,'numbers'=>$numbers];
                 $sum+=$amount;
                 if($sum>1000000000000)fail('Monto de devolución fuera de rango.',422);
             }
@@ -106,8 +113,15 @@ function registerCustomerReturnRoutes(RouteCollectorProxy $group): void {
             $getProduct=$db->prepare('SELECT id,stock_qty,is_active,sale_unit,name FROM products WHERE id=? AND business_id=? FOR UPDATE');
             foreach($validated as $v){
                 $line=$v['line'];$pid=(int)$line['product_id'];$qty=$v['qty'];
-                $restock=$kind==='commercial';
-                if($restock){
+                $restock=$kind==='commercial';$numbers=$v['numbers'];
+                if($numbers){
+                    $getProduct->execute([$pid,$biz]);$p=$getProduct->fetch();$getProduct->closeCursor();
+                    if(!$p||$p['sale_unit']!=='unidad'||!serialControlled($db,$biz,$pid)||($restock&&(int)$p['is_active']!==1))fail('Producto serializado no disponible para esta devolución.',409);
+                    serialReconcile($db,$biz,$pid,(float)$p['stock_qty']);
+                    serialRestoreUnits($db,$admin,$saleId,(int)$line['id'],$pid,$saleLocation,$numbers,$kind,$returnId,$reason);
+                    if($restock){$balance=titoRestoreSerialLocationStock($db,$biz,$pid,$saleLocation,$qty);move($db,$biz,$pid,null,$uid,'adjustment',number_format($qty,3,'.',''),$balance,'Devolución serializada #'.$returnId.' · Venta #'.$saleId);}
+                    serialReconcile($db,$biz,$pid,$restock?(float)$balance:(float)$p['stock_qty']);
+                }elseif($restock){
                     $getProduct->execute([$pid,$biz]);$product=$getProduct->fetch();$getProduct->closeCursor();
                     if(!$product||(int)$product['is_active']!==1)fail('Producto inactivo; no puede volver a stock vendible. Revisar manualmente.',409);
                     if($product['sale_unit']!==$line['sale_unit'])fail('Cambió la unidad del producto; no se puede restituir stock automáticamente.',409);

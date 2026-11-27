@@ -74,6 +74,18 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
   const age=saleAge(detail?.sale_created_at);
   const remaining=items.some(i=>Number(i.quantity)>Number(i.returned_qty)+0.000001);
 
+  function changeQuantity(line,raw){
+    if(locked)return;
+    const available=Math.max(0,Number(line.quantity)-Number(line.returned_qty));
+    const n=Number(raw);
+    if(raw===''||!Number.isFinite(n)){setQuantities(q=>({...q,[line.sale_item_id]:''}));return;}
+    const scale=line.sale_unit==='unidad'?1:1000;
+    const max=Math.floor((available+0.0000001)*scale)/scale;
+    const bounded=Math.min(max,Math.max(0,n));
+    const value=Math.floor((bounded+0.0000001)*scale)/scale;
+    setQuantities(q=>({...q,[line.sale_item_id]:value===n?raw:String(value)}));
+  }
+
   async function loadAssessments(){
     try{const data=await request('/returns/assessments');setAssessments(data.assessments||[]);setAssessmentError('');}
     catch(e){setAssessmentError('No se pudo cargar el historial de evaluaciones. Comprueba el despliegue y la migración 014. '+e.message);}
@@ -180,7 +192,7 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
       if(!Number.isFinite(i.selected_qty)||i.selected_qty>i.available+0.000001||
         (i.sale_unit==='unidad'&&!Number.isInteger(i.selected_qty))||
         Math.abs(i.selected_qty*1000-Math.round(i.selected_qty*1000))>0.000001){
-        notify('La cantidad excede lo pendiente de devolver: '+i.product_name_snapshot,'error');return;
+        notify('Cantidad inválida para '+i.product_name_snapshot+'. Máximo disponible: '+qtyFormat(i.available)+'.','error');return;
       }
     }
     if(denied){
@@ -311,11 +323,12 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
             const available=Math.max(0,Number(line.quantity)-Number(line.returned_qty));
             return <div className="returns-line" key={line.sale_item_id}>
               <div><strong>{line.product_name_snapshot}</strong><small>{qtyFormat(available)} de {qtyFormat(line.quantity)} {line.sale_unit} disponibles para devolución · Vendido a {pesos(line.unit_price_clp)}</small></div>
-              {line.serial_units?.length?<div><strong>{denied?'Selecciona las series evaluadas':'Selecciona las series recibidas'}</strong><p className="helper">{(chosenSeries[line.sale_item_id]||[]).length} seleccionadas</p><div style={{maxHeight:230,overflowY:'auto'}}>{line.serial_units.map(u=>{const picked=(chosenSeries[line.sale_item_id]||[]).includes(u.serial_number);const blocked=!!u.reversal_kind||u.status!=='sold';return <label key={u.unit_id}><input type="checkbox" checked={picked} disabled={locked||blocked||available<=0} onChange={e=>{const checked=e.target.checked;setChosenSeries(a=>({...a,[line.sale_item_id]:checked?[...new Set([...(a[line.sale_item_id]||[]),u.serial_number]) ]:(a[line.sale_item_id]||[]).filter(n=>n!==u.serial_number)}));}}/>{u.serial_number}{blocked?' · Ya retornada o no disponible':''}</label>;})}</div></div>:<label>{denied?'Cantidad evaluada':'Cantidad a devolver'}
+              {line.serial_units?.length?<div><strong>{denied?'Selecciona las series evaluadas':'Selecciona las series recibidas'}</strong><p className="helper">{(chosenSeries[line.sale_item_id]||[]).length} seleccionadas</p><div style={{maxHeight:230,overflowY:'auto'}}>{line.serial_units.map(u=>{const picked=(chosenSeries[line.sale_item_id]||[]).includes(u.serial_number);const blocked=!!u.reversal_kind||u.status!=='sold';return <label key={u.unit_id}><input type="checkbox" checked={picked} disabled={locked||blocked||available<=0||(!picked&&(chosenSeries[line.sale_item_id]||[]).length>=available)} onChange={e=>{const checked=e.target.checked;setChosenSeries(a=>{const old=a[line.sale_item_id]||[];if(checked&&(old.includes(u.serial_number)||old.length+1>available+0.000001))return a;return {...a,[line.sale_item_id]:checked?[...old,u.serial_number]:old.filter(n=>n!==u.serial_number)};});}}/>{u.serial_number}{blocked?' · Ya retornada o no disponible':''}</label>;})}</div></div>:<label>{denied?'Cantidad evaluada':'Cantidad a devolver'}
                 <input type="number" min="0" max={available} step={line.sale_unit==='unidad'?'1':'0.001'}
                   value={quantities[line.sale_item_id]??''} placeholder="0"
                   disabled={locked||available<=0}
-                  onChange={e=>setQuantities(q=>({...q,[line.sale_item_id]:e.target.value}))}/>
+                  onChange={e=>changeQuantity(line,e.target.value)}/>
+                <small className="helper">Máximo permitido: {qtyFormat(available)} {line.sale_unit}. No puede superar la cantidad vendida pendiente de devolución.</small>
               </label>}
             </div>;
           })}

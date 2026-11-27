@@ -60,7 +60,37 @@ function serialTransfer(PDO $db,array $actor,int $pid,int $source,int $target,in
         $event->execute([$biz,$id,$uid,$details]);
     }
 }
+function serialSaleRecord(PDO $db,array $actor,int $pid,int $warehouse,int $sale,int $line,int $price,array $numbers): void {
+    $biz=(int)$actor['business_id'];$uid=(int)$actor['id'];
+    $get=$db->prepare("SELECT id FROM serial_units WHERE business_id=? AND product_id=? AND warehouse_id=? AND serial_number=? AND status='in_stock' FOR UPDATE");
+    $upd=$db->prepare("UPDATE serial_units SET status='sold' WHERE id=? AND business_id=? AND status='in_stock'");
+    $ins=$db->prepare('INSERT INTO serial_sale_units(unit_id,business_id,sale_id,sale_item_id,warehouse_id,unit_price_clp) VALUES(?,?,?,?,?,?)');
+    $event=$db->prepare("INSERT INTO serial_unit_events(business_id,unit_id,actor_id,event_type,details) VALUES(?,?,?,'sold',?)");
+    foreach($numbers as $n){
+        $get->execute([$biz,$pid,$warehouse,$n]);$id=$get->fetchColumn();$get->closeCursor();
+        if($id===false)throw new HttpError('Serie no disponible en bodega: '.$n,409,'serial_numbers');
+        $upd->execute([$id,$biz]);if($upd->rowCount()!==1)fail('La serie ya no está disponible.',409);
+        $ins->execute([$id,$biz,$sale,$line,$warehouse,$price]);
+        $event->execute([$biz,$id,$uid,json_encode(['sale_id'=>$sale,'sale_item_id'=>$line,'warehouse_id'=>$warehouse],JSON_THROW_ON_ERROR)]);
+    }
+}
 function registerSerialRoutes(RouteCollectorProxy $group): void {
+    $group->get('/sales/serial-clients',static function(Request $request,Response $response): Response {
+        $u=$request->getAttribute('currentUser');$biz=(int)$u['business_id'];
+        $q=$request->getQueryParams()['q']??'';if(!is_string($q)||mb_strlen($q)>120)fail('Búsqueda inválida.',422);
+        $s=db()->prepare('SELECT id,name FROM habitual_clients WHERE business_id=? AND is_active=1 AND name LIKE ? ORDER BY name,id LIMIT 100');$s->execute([$biz,'%'.trim($q).'%']);
+        return respond($response,['clients'=>$s->fetchAll()]);
+    });
+    $group->get('/sales/serial-available',static function(Request $request,Response $response): Response {
+        $u=$request->getAttribute('currentUser');$biz=(int)$u['business_id'];$q=$request->getQueryParams();
+        $pid=filter_var($q['product_id']??null,FILTER_VALIDATE_INT,['options'=>['min_range'=>1]]);
+        $wid=filter_var($q['warehouse_id']??null,FILTER_VALIDATE_INT,['options'=>['min_range'=>1]]);
+        $search=$q['q']??'';if($pid===false||$wid===false||!is_string($search)||mb_strlen($search)>120)fail('Filtros inválidos.',422);
+        $db=db();$loc=titoSaleLocation($db,$u,$wid,true,$request);
+        $s=$db->prepare("SELECT x.id,x.serial_number FROM serial_units x JOIN products p ON p.id=x.product_id AND p.business_id=x.business_id AND p.is_active=1 WHERE x.business_id=? AND x.product_id=? AND x.warehouse_id=? AND x.status='in_stock' AND x.serial_number LIKE ? ORDER BY x.serial_number LIMIT 501");
+        $s->execute([$biz,$pid,$loc,'%'.mb_strtoupper(trim($search),'UTF-8').'%']);$rows=$s->fetchAll();
+        return respond($response,['units'=>array_slice($rows,0,500),'more'=>count($rows)>500]);
+    });
     $group->get('/serials/available',static function(Request $request,Response $response): Response {
         $u=adminOnly($request);$biz=(int)$u['business_id'];$q=$request->getQueryParams();
         $pid=filter_var($q['product_id']??null,FILTER_VALIDATE_INT,['options'=>['min_range'=>1]]);
@@ -97,7 +127,7 @@ function registerSerialRoutes(RouteCollectorProxy $group): void {
         $u=adminOnly($request);$biz=(int)$u['business_id'];$q=$request->getQueryParams()['q']??'';
         if(!is_string($q)||mb_strlen($q)>120)fail('Búsqueda inválida.',422);
         $term='%'.trim($q).'%';
-        $s=db()->prepare('SELECT x.id,x.serial_number,x.status,x.receipt_id,x.received_at,x.unit_cost_clp,p.name AS product_name,p.sku,w.name AS warehouse_name,h.supplier_name FROM serial_units x JOIN products p ON p.id=x.product_id AND p.business_id=x.business_id JOIN warehouses w ON w.id=x.warehouse_id AND w.business_id=x.business_id JOIN receipt_supplier_snapshots h ON h.receipt_id=x.receipt_id AND h.business_id=x.business_id AND h.supplier_id=x.supplier_id WHERE x.business_id=? AND (x.serial_number LIKE ? OR p.name LIKE ? OR p.sku LIKE ?) ORDER BY x.id DESC LIMIT 100');
+        $s=db()->prepare('SELECT x.id,x.serial_number,x.status,x.receipt_id,x.received_at,x.unit_cost_clp,p.name AS product_name,p.sku,w.name AS warehouse_name,h.supplier_name,ss.sale_id,sc.client_name FROM serial_units x JOIN products p ON p.id=x.product_id AND p.business_id=x.business_id JOIN warehouses w ON w.id=x.warehouse_id AND w.business_id=x.business_id JOIN receipt_supplier_snapshots h ON h.receipt_id=x.receipt_id AND h.business_id=x.business_id AND h.supplier_id=x.supplier_id LEFT JOIN serial_sale_units ss ON ss.unit_id=x.id AND ss.business_id=x.business_id LEFT JOIN serial_sale_snapshots sc ON sc.sale_id=ss.sale_id AND sc.business_id=x.business_id WHERE x.business_id=? AND (x.serial_number LIKE ? OR p.name LIKE ? OR p.sku LIKE ?) ORDER BY x.id DESC LIMIT 100');
         $s->execute([$biz,$term,$term,$term]);return respond($response,['units'=>$s->fetchAll()]);
     });
     $group->get('/serials/units/{id:[0-9]+}/events',static function(Request $request,Response $response,array $args): Response {

@@ -89,13 +89,14 @@ function registerUserAndSaleDetailRoutes(RouteCollectorProxy $group): void {
         $user=$request->getAttribute('currentUser');
         $biz=(int)$user['business_id'];$id=(int)$args['id'];
         $admin=($user['role']??'')==='admin';
-        $sql='SELECT s.id,s.status,s.voided_at,s.void_reason,s.total_clp,s.payment_method,s.created_at,s.sold_by,s.warehouse_id,w.name AS warehouse_name,u.email AS seller_email,vu.email AS voided_by_email,sp.point_name AS sales_point_name,sp.branch_name AS commercial_branch_name FROM sales s JOIN users u ON u.id=s.sold_by LEFT JOIN users vu ON vu.id=s.voided_by LEFT JOIN warehouses w ON w.id=s.warehouse_id AND w.business_id=s.business_id LEFT JOIN sale_point_snapshots sp ON sp.sale_id=s.id AND sp.business_id=s.business_id WHERE s.id=? AND s.business_id=?';
+        $sql='SELECT s.id,s.status,s.voided_at,s.void_reason,s.total_clp,s.payment_method,s.created_at,s.sold_by,s.warehouse_id,w.name AS warehouse_name,u.email AS seller_email,vu.email AS voided_by_email,sp.point_name AS sales_point_name,sp.branch_name AS commercial_branch_name,ss.client_name AS serial_client_name FROM sales s JOIN users u ON u.id=s.sold_by LEFT JOIN users vu ON vu.id=s.voided_by LEFT JOIN warehouses w ON w.id=s.warehouse_id AND w.business_id=s.business_id LEFT JOIN sale_point_snapshots sp ON sp.sale_id=s.id AND sp.business_id=s.business_id LEFT JOIN serial_sale_snapshots ss ON ss.sale_id=s.id AND ss.business_id=s.business_id WHERE s.id=? AND s.business_id=?';
         $params=[$id,$biz];
         if(!$admin){$sql.=' AND s.sold_by=?';$params[]=(int)$user['id'];}
         $st=db()->prepare($sql.' LIMIT 1');$st->execute($params);$sale=$st->fetch();
         if(!$sale)fail('Venta no encontrada.',404);
         $st=db()->prepare('SELECT si.id,si.product_id,COALESCE(si.product_name_snapshot,p.name) AS product_name,p.sku,si.quantity,si.unit_price_clp,COALESCE(si.list_price_clp,si.unit_price_clp) AS list_price_clp,si.discount_reason,si.subtotal_clp FROM sale_items si JOIN products p ON p.id=si.product_id AND p.business_id=? WHERE si.sale_id=? ORDER BY si.id');
         $st->execute([$biz,$id]);$items=$st->fetchAll();
+        $s=db()->prepare('SELECT su.sale_item_id,x.serial_number FROM serial_sale_units su JOIN serial_units x ON x.id=su.unit_id AND x.business_id=su.business_id WHERE su.business_id=? AND su.sale_id=? ORDER BY x.serial_number');$s->execute([$biz,$id]);$map=[];foreach($s->fetchAll() as $r)$map[$r['sale_item_id']][]=$r['serial_number'];foreach($items as &$item)$item['serial_numbers']=$map[$item['id']]??[];unset($item);
         return respond($response,['sale'=>$sale,'items'=>$items]);
     });
 }

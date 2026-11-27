@@ -84,6 +84,7 @@ function registerCustomerReturnRoutes(RouteCollectorProxy $group): void {
             foreach($wanted as $lineId=>$rawQty){
                 if(!isset($byId[$lineId]))fail('La línea no pertenece a esta venta.',422);
                 $line=$byId[$lineId];$qty=(float)$rawQty;$original=(float)$line['quantity'];
+                $guard=$db->prepare('SELECT unit_id FROM serial_sale_units WHERE business_id=? AND sale_id=? AND sale_item_id=? LIMIT 1');$guard->execute([$biz,$saleId,$lineId]);if($guard->fetchColumn())fail('Esta devolución requiere identificar las series. Funcionalidad pendiente.',409);
                 $oldQty=(float)($already[$lineId]['qty']??0);
                 $remaining=$original-$oldQty;
                 if($qty>$remaining+0.000001||$remaining<=0)fail('Cantidad excede lo vendido y todavía no devuelto.',409);

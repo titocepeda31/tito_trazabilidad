@@ -220,16 +220,34 @@ $app->group('', static function(RouteCollectorProxy $group): void {
                 'unit_price_clp'=>$item['unit_price_clp']??null,
                 'discount_reason'=>$item['discount_reason']??null,
             ];
+            if(array_key_exists('serial_numbers',$item))$wanted[$id]['serial_numbers']=serialNormalizeList($item['serial_numbers']);
         }
         ksort($wanted,SORT_NUMERIC);
+        $hasSerial=false;foreach($wanted as $spec)if(array_key_exists('serial_numbers',$spec))$hasSerial=true;
+        $clientId=null;$serialHash=null;
+        if($hasSerial){
+            $clientId=originId($b['serial_client_id']??null,'serial_client_id');
+            if($clientId===null)throw new HttpError('Selecciona el cliente para la venta de equipos.',422,'serial_client_id');
+            if(isset($b['discount_approval_token'])||isset($b['discount_request_id']))fail('La autorización de descuentos en ventas por serie queda pendiente de integración.',422);
+            $serialHash=hash('sha256',json_encode([$uid,$payment,$b['warehouse_id']??null,$clientId,$wanted],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
+        }elseif(array_key_exists('serial_client_id',$b))fail('Cliente serializado sin series.',422);
         $db=db();
         try{
             $db->beginTransaction();
+            originLockCompany($db,$biz);
+            $old=$db->prepare('SELECT s.id,s.sold_by,s.total_clp,s.warehouse_id,ss.payload_hash FROM sales s LEFT JOIN serial_sale_snapshots ss ON ss.sale_id=s.id AND ss.business_id=s.business_id WHERE s.business_id=? AND s.request_id=? FOR UPDATE');$old->execute([$biz,$requestId]);$prior=$old->fetch();$old->closeCursor();
+            if($prior){
+                if((int)$prior['sold_by']!==$uid||($prior['payload_hash']!==null&&(!$hasSerial||!hash_equals((string)$prior['payload_hash'],$serialHash)))||($hasSerial&&$prior['payload_hash']===null))fail('Identificador de venta reutilizado con otros datos.',409);
+                $db->commit();return respond($response,['ok'=>true,'sale_id'=>(int)$prior['id'],'total_clp'=>(int)$prior['total_clp'],'warehouse_id'=>$prior['warehouse_id'],'already_recorded'=>true]);
+            }
+            $clientName=null;
+            if($hasSerial){$c=$db->prepare('SELECT name FROM habitual_clients WHERE business_id=? AND id=? AND is_active=1 FOR UPDATE');$c->execute([$biz,$clientId]);$clientName=$c->fetchColumn();$c->closeCursor();if($clientName===false)throw new HttpError('Cliente activo no encontrado.',422,'serial_client_id');}
             $saleLocation=titoSaleLocation($db,$user,$b['warehouse_id']??null,true,$request);
             $cashSessionId=titoCashSessionForSale($db,$user,$saleLocation);
             $st=$db->prepare('INSERT INTO sales(business_id,sold_by,request_id,payment_method,total_clp,warehouse_id,cash_session_id) VALUES (?,?,?,?,0,?,?)');
             $st->execute([$biz,$uid,$requestId,$payment,$saleLocation,$cashSessionId]);
             $saleId=(int)$db->lastInsertId();
+            if($hasSerial){$s=$db->prepare('INSERT INTO serial_sale_snapshots(sale_id,business_id,client_id,client_name,payload_hash) VALUES(?,?,?,?,?)');$s->execute([$saleId,$biz,$clientId,$clientName,$serialHash]);}
             salesPointRecord($db,$user,$request,$saleId,$saleLocation);
             $discountApproval=titoConsumeDiscountApproval($db,$user,$b,$saleId);
             $lock=$db->prepare('SELECT id,name,price_clp,stock_qty,sale_unit FROM products WHERE id=? AND business_id=? AND is_active=1 FOR UPDATE');
@@ -268,8 +286,18 @@ $app->group('', static function(RouteCollectorProxy $group): void {
                 $sub=(int)round((float)$qty*$unitPrice,0,PHP_ROUND_HALF_UP);
                 $total+=$sub;
                 if($total>1000000000000)fail('Venta demasiado grande.',422);
-                $next=titoApplyLocationStock($db,$biz,$id,$saleLocation,-(float)$qty);
+                $controlled=serialControlled($db,$biz,$id);$numbers=$spec['serial_numbers']??[];
+                if($controlled){
+                    if(!$hasSerial||$product['sale_unit']!=='unidad'||(float)$qty!==(float)count($numbers))throw new HttpError('Selecciona una serie disponible por unidad de '.$product['name'].'.',422,'serial_numbers');
+                    serialReconcile($db,$biz,$id,(float)$product['stock_qty']);
+                    $next=titoSellSerialLocationStock($db,$biz,$id,$saleLocation,(float)$qty);
+                }else{
+                    if(array_key_exists('serial_numbers',$spec))fail('El producto no tiene control de series.',422);
+                    $next=titoApplyLocationStock($db,$biz,$id,$saleLocation,-(float)$qty);
+                }
                 $insert->execute([$saleId,$id,$product['name'],$qty,$unitPrice,$listPrice,$reason,$sub]);
+                $lineId=(int)$db->lastInsertId();
+                if($controlled){serialSaleRecord($db,$user,$id,$saleLocation,$saleId,$lineId,$unitPrice,$numbers);serialReconcile($db,$biz,$id,(float)$next);}
                 move($db,$biz,$id,$saleId,$uid,'sale',number_format(-(float)$qty,3,'.',''),$next,'Venta registrada');
             }
             $st=$db->prepare('UPDATE sales SET total_clp=? WHERE id=? AND business_id=?');
@@ -282,7 +310,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
             if($e instanceof PDOException && (int)($e->errorInfo[1]??0)===1062){
                 $st=$db->prepare('SELECT id,total_clp FROM sales WHERE business_id=? AND request_id=?');
                 $st->execute([$biz,$requestId]);$prior=$st->fetch();
-                if($prior)return respond($response,['ok'=>true,'sale_id'=>(int)$prior['id'],'total_clp'=>(int)$prior['total_clp'],'already_recorded'=>true]);
+                if($prior&&!$hasSerial)fail('Identificador de venta ya registrado; consulta el historial antes de reintentar.',409);
             }
             throw $e;
         }

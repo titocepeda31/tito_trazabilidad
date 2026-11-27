@@ -113,23 +113,27 @@ function titoSaleHistoricalLocation(PDO $db,int $biz,int $saleId): int {
  * Debe invocarse DENTRO de la transacción del movimiento; no crea un traslado comercial.
  */
 function titoApplyLocationStock(PDO $db,int $biz,int $pid,int $warehouseId,float $delta): string {
-    return titoApplyLocationStockCore($db,$biz,$pid,$warehouseId,$delta,false);
+    return titoApplyLocationStockCore($db,$biz,$pid,$warehouseId,$delta,'legacy');
 }
 /** Solo para recepción: quien llama debe insertar las unidades y conciliar en la misma transacción. */
 function titoReceiveLocationStock(PDO $db,int $biz,int $pid,int $warehouseId,float $quantity,bool $serialReceipt): string {
     if($quantity<=0)fail('Cantidad recibida inválida.',422);
-    return titoApplyLocationStockCore($db,$biz,$pid,$warehouseId,$quantity,$serialReceipt);
+    return titoApplyLocationStockCore($db,$biz,$pid,$warehouseId,$quantity,$serialReceipt?'receipt':'legacy');
 }
-function titoApplyLocationStockCore(PDO $db,int $biz,int $pid,int $warehouseId,float $delta,bool $serialReceipt): string {
+function titoSellSerialLocationStock(PDO $db,int $biz,int $pid,int $warehouseId,float $quantity): string {
+    if($quantity<=0)fail('Cantidad vendida inválida.',422);
+    return titoApplyLocationStockCore($db,$biz,$pid,$warehouseId,-$quantity,'sale');
+}
+function titoApplyLocationStockCore(PDO $db,int $biz,int $pid,int $warehouseId,float $delta,string $mode): string {
     if(!$db->inTransaction())throw new RuntimeException('Se requiere transacción de inventario.');
     if(!is_finite($delta)||abs($delta)<0.0005||abs($delta)>1000000000
         ||abs($delta*1000-round($delta*1000))>0.00001)fail('Variación de stock inválida.',422);
     $p=$db->prepare('SELECT stock_qty FROM products WHERE id=? AND business_id=? FOR UPDATE');
     $p->execute([$pid,$biz]);$global=$p->fetchColumn();$p->closeCursor();
     if($global===false)fail('Producto ajeno a la empresa o inexistente.',404);
-    if($serialReceipt){
-        if($delta<=0||!serialControlled($db,$biz,$pid))fail('Recepción serializada inválida.',409);
-    }else serialRejectLegacy($db,$biz,$pid);
+    if($mode==='receipt'||$mode==='sale'){
+        if(($mode==='receipt'&&$delta<=0)||($mode==='sale'&&$delta>=0)||!serialControlled($db,$biz,$pid))fail('Movimiento serializado inválido.',409);
+    }elseif($mode==='legacy')serialRejectLegacy($db,$biz,$pid);else throw new RuntimeException('Modo inválido.');
     $st=$db->prepare('SELECT ws.warehouse_id,ws.qty,w.code,w.business_id FROM warehouse_stocks ws JOIN warehouses w ON w.id=ws.warehouse_id AND w.business_id=ws.business_id WHERE ws.product_id=? AND ws.business_id=? ORDER BY ws.warehouse_id FOR UPDATE');
     $st->execute([$pid,$biz]);$rows=$st->fetchAll();$st->closeCursor();
     $balances=[];$localId=null;$sum=0.0;

@@ -14,9 +14,39 @@ function registerCustomerReturnRoutes(RouteCollectorProxy $group): void {
         return respond($response,['returns'=>$st->fetchAll()]);
     });
 
+    // Search current business only; an exact serial resolves to its latest unreversed sale.
+    $group->get('/returns/search',static function(Request $request,Response $response): Response {
+        $admin=adminOnly($request);$biz=(int)$admin['business_id'];
+        $q=$request->getQueryParams()['q']??'';
+        if(!is_string($q)||!mb_check_encoding($q,'UTF-8')||mb_strlen(trim($q))<1||mb_strlen(trim($q))>120)fail('Ingresa un código, serie, cliente o número de venta válido.',422);
+        $q=trim($q);
+        $serialSql="SELECT s.id AS sale_id,s.created_at,s.total_clp,ss.client_name,si.product_name_snapshot AS product_name,x.serial_number,su.sale_item_id
+            FROM serial_units x JOIN serial_sale_units su ON su.unit_id=x.id AND su.business_id=x.business_id
+            JOIN sales s ON s.id=su.sale_id AND s.business_id=su.business_id
+            JOIN sale_items si ON si.id=su.sale_item_id AND si.sale_id=s.id
+            JOIN serial_sale_snapshots ss ON ss.sale_id=s.id AND ss.business_id=s.business_id
+            WHERE x.business_id=? AND x.serial_number=? AND x.status='sold' AND x.warehouse_id=su.warehouse_id AND s.status='completed'
+            AND NOT EXISTS(SELECT 1 FROM serial_sale_reversals rr WHERE rr.unit_id=su.unit_id AND rr.sale_id=su.sale_id)
+            AND NOT EXISTS(SELECT 1 FROM serial_sale_units later WHERE later.unit_id=su.unit_id AND later.sale_id>su.sale_id)
+            AND NOT EXISTS(SELECT 1 FROM credit_accounts ca WHERE ca.business_id=s.business_id AND ca.sale_id=s.id)
+            ORDER BY s.id DESC,x.id LIMIT 51";
+        $st=db()->prepare($serialSql);$st->execute([$biz,$q]);$series=$st->fetchAll();$st->closeCursor();
+        $saleCode=ltrim($q,'#');
+        $saleSql="SELECT s.id AS sale_id,s.created_at,s.total_clp,ss.client_name
+            FROM sales s LEFT JOIN serial_sale_snapshots ss ON ss.sale_id=s.id AND ss.business_id=s.business_id
+            WHERE s.business_id=? AND s.status='completed'
+            AND NOT EXISTS(SELECT 1 FROM credit_accounts ca WHERE ca.business_id=s.business_id AND ca.sale_id=s.id)
+            AND (CAST(s.id AS CHAR)=? OR LOCATE(?,COALESCE(ss.client_name,''))>0
+            OR EXISTS(SELECT 1 FROM sale_items si JOIN products p ON p.id=si.product_id AND p.business_id=s.business_id
+                WHERE si.sale_id=s.id AND (p.sku=? OR p.barcode=? OR LOCATE(?,si.product_name_snapshot)>0)))
+            ORDER BY s.id DESC LIMIT 51";
+        $st=db()->prepare($saleSql);$st->execute([$biz,$saleCode,$q,$q,$q,$q]);$sales=$st->fetchAll();$st->closeCursor();
+        return respond($response,['series'=>array_slice($series,0,50),'sales'=>array_slice($sales,0,50),'more'=>count($series)>50||count($sales)>50]);
+    });
+
     $group->get('/sales/{id:[0-9]+}/returns',static function(Request $request,Response $response,array $args): Response {
         $admin=adminOnly($request);$biz=(int)$admin['business_id'];$saleId=(int)$args['id'];
-        $st=db()->prepare('SELECT id,status FROM sales WHERE id=? AND business_id=?');
+        $st=db()->prepare('SELECT s.id,s.status,s.created_at,s.total_clp,ss.client_name FROM sales s LEFT JOIN serial_sale_snapshots ss ON ss.sale_id=s.id AND ss.business_id=s.business_id WHERE s.id=? AND s.business_id=?');
         $st->execute([$saleId,$biz]);$sale=$st->fetch();
         if(!$sale)fail('Venta no encontrada.',404);
         $st=db()->prepare('SELECT si.id AS sale_item_id,si.product_id,si.product_name_snapshot,si.quantity,si.unit_price_clp,si.subtotal_clp,p.sale_unit,COALESCE(SUM(ri.quantity),0) AS returned_qty,COALESCE(SUM(ri.amount_clp),0) AS returned_amount_clp FROM sale_items si JOIN products p ON p.id=si.product_id AND p.business_id=? LEFT JOIN customer_return_items ri ON ri.sale_item_id=si.id WHERE si.sale_id=? GROUP BY si.id,si.product_id,si.product_name_snapshot,si.quantity,si.unit_price_clp,si.subtotal_clp,p.sale_unit ORDER BY si.id');
@@ -25,7 +55,7 @@ function registerCustomerReturnRoutes(RouteCollectorProxy $group): void {
         $st=db()->prepare('SELECT r.id,r.return_kind,r.item_condition,r.resolution,r.reason,r.amount_clp,r.refund_status,r.refund_method,r.refund_reference,r.created_at,r.refunded_at,u.email AS created_by_email FROM customer_returns r JOIN users u ON u.id=r.created_by AND u.business_id=r.business_id WHERE r.sale_id=? AND r.business_id=? ORDER BY r.id DESC');
         $st->execute([$saleId,$biz]);$returns=$st->fetchAll();$st->closeCursor();
         $s=db()->prepare('SELECT rr.return_id,x.serial_number FROM serial_sale_reversals rr JOIN serial_units x ON x.id=rr.unit_id AND x.business_id=rr.business_id WHERE rr.business_id=? AND rr.sale_id=? AND rr.return_id IS NOT NULL ORDER BY x.serial_number');$s->execute([$biz,$saleId]);$map=[];foreach($s->fetchAll() as $r)$map[$r['return_id']][]=$r['serial_number'];foreach($returns as &$r)$r['serial_numbers']=$map[$r['id']]??[];unset($r);
-        return respond($response,['sale_id'=>$saleId,'sale_status'=>$sale['status'],'items'=>$items,'returns'=>$returns]);
+        return respond($response,['sale_id'=>$saleId,'sale_status'=>$sale['status'],'sale_created_at'=>$sale['created_at'],'sale_total_clp'=>$sale['total_clp'],'client_name'=>$sale['client_name'],'items'=>$items,'returns'=>$returns]);
     });
 
     $group->post('/sales/{id:[0-9]+}/returns',static function(Request $request,Response $response,array $args): Response {

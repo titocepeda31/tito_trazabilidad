@@ -1,4 +1,4 @@
-import React,{useEffect,useMemo,useState} from 'react';
+import React,{useEffect,useMemo,useRef,useState} from 'react';
 import {newId,pesos,qtyFormat} from './api.js';
 import {inChilePeriod,pageSlice} from './historyFilters.js';
 
@@ -11,9 +11,21 @@ const dateChile=value=>{
   return Number.isFinite(date.valueOf())?date.toLocaleString('es-CL',{timeZone:'America/Santiago',dateStyle:'short',timeStyle:'short'}):String(value);
 };
 
+// Calendar days in Chile, informational only; sale date may differ from receipt date.
+const saleAge=value=>{
+  if(!value)return null;
+  const d=new Date(String(value).replace(' ','T')+(String(value).endsWith('Z')?'':'Z'));
+  if(!Number.isFinite(d.valueOf()))return null;
+  const day=t=>{const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Santiago',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(t);const p=Object.fromEntries(parts.map(x=>[x.type,x.value]));return Date.UTC(+p.year,+p.month-1,+p.day);};
+  return Math.max(0,Math.round((day(new Date())-day(d))/86400000));
+};
+
 export default function ReturnsPanel({sales,request,notify,onChange,initialSaleId}){
   const [saleId,setSaleId]=useState(initialSaleId?String(initialSaleId):'');
   const [detail,setDetail]=useState(null);
+  const [view,setView]=useState('new');
+  const [query,setQuery]=useState(''),[searchResults,setSearchResults]=useState(null),[searchBusy,setSearchBusy]=useState(false),[searchError,setSearchError]=useState('');
+  const autoPick=useRef(null),loadVersion=useRef(0);
   const [history,setHistory]=useState([]);
   const [creditHistory,setCreditHistory]=useState([]);
   const [historyQuery,setHistoryQuery]=useState('');
@@ -56,6 +68,7 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
   }).filter(i=>i.selected_qty>0),[items,quantities,chosenSeries]);
   const total=selected.reduce((sum,i)=>sum+i.amount,0);
   const denied=returnKind==='customer_damage';
+  const age=saleAge(detail?.sale_created_at);
   const remaining=items.some(i=>Number(i.quantity)>Number(i.returned_qty)+0.000001);
 
   async function loadHistory(){
@@ -74,22 +87,47 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
     }
   }
   async function loadSale(id){
+    const version=++loadVersion.current;
+    const pick=autoPick.current;autoPick.current=null;
     if(!id){setDetail(null);return;}
     setLoading(true);
     try{
       const data=await request('/sales/'+id+'/returns');
+      if(version!==loadVersion.current)return;
       setDetail(data);setQuantities({});setChosenSeries({});setBackendMissing(false);
+      if(pick&&String(pick.sale_id)===String(id)){
+        const line=(data.items||[]).find(i=>String(i.sale_item_id)===String(pick.sale_item_id));
+        if(line&&Number(line.quantity)>Number(line.returned_qty)&&line.serial_units?.some(u=>u.serial_number===pick.serial_number&&u.status==='sold'&&!u.reversal_kind)){
+          setChosenSeries({[line.sale_item_id]:[pick.serial_number]});
+        }
+      }
     }catch(e){
+      if(version!==loadVersion.current)return;
       setDetail(null);
       if(e.status===404)setBackendMissing(true);
       else notify('No se pudo revisar la venta: '+e.message,'error');
-    }finally{setLoading(false);}
+    }finally{if(version===loadVersion.current)setLoading(false);}
   }
   useEffect(()=>{void loadHistory();},[]);
   useEffect(()=>{
-    if(initialSaleId)setSaleId(String(initialSaleId));
+    if(initialSaleId){setView('new');setSaleId(String(initialSaleId));}
   },[initialSaleId]);
   useEffect(()=>{void loadSale(saleId);},[saleId]);
+
+  async function searchSale(e){
+    e.preventDefault();if(locked||searchBusy||!query.trim())return;
+    setSearchBusy(true);setSearchError('');setSearchResults(null);
+    try{setSearchResults(await request('/returns/search?q='+encodeURIComponent(query.trim())));}
+    catch(e){setSearchError('No se pudo buscar: '+e.message);}
+    finally{setSearchBusy(false);}
+  }
+  function chooseSale(id,pick=null){
+    if(locked)return;
+    const next=String(id||'');
+    ++loadVersion.current;setDetail(null);setQuantities({});setChosenSeries({});setReason('');setInspectionConfirmed(false);setReturnKind('commercial');setResolution('refund');
+    autoPick.current=pick;setView('new');setSearchResults(null);
+    if(next===saleId)void loadSale(next);else setSaleId(next);
+  }
 
   async function saveReturn(body){
     setBusy(true);
@@ -112,7 +150,7 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
   }
   function submit(e){
     e.preventDefault();
-    if(locked||!detail||denied)return;
+    if(locked||!detail||String(detail.sale_id)!==String(saleId)||denied)return;
     if(detail.sale_status!=='completed'){notify('La venta debe estar vigente para devolver productos.','error');return;}
     if(reason.trim().length<5){notify('Describe el motivo de devolución (mínimo cinco caracteres).','error');return;}
     if(!inspectionConfirmed){notify('Debes confirmar la inspección y recepción física del producto.','error');return;}
@@ -160,18 +198,39 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
     {backendMissing&&<section className="warning-box" role="status">
       El módulo todavía requiere instalar la API de devoluciones en cPanel. No registres ajustes de stock para simular una devolución.
     </section>}
-    <section className="panel pad returns-form-panel">
-      <div className="panel-heading"><div><h3>Nueva devolución</h3><p>Busca primero la venta original.</p></div></div>
-      <label>Venta registrada
-        <select value={saleId} disabled={locked} onChange={e=>setSaleId(e.target.value)}>
+    <div className="role-nav" aria-label="Vistas de postventa">
+      <button type="button" className={view==='new'?'primary':'ghost'} onClick={()=>setView('new')}>Nueva devolución</button>
+      <button type="button" className={view==='history'?'primary':'ghost'} onClick={()=>setView('history')}>Historial</button>
+    </div>
+    {view==='history'&&pending&&<p className="warning-box">Existe un registro pendiente de confirmar. Revisa el historial y vuelve a Nueva devolución para reintentar el mismo registro.</p>}
+    {view==='new'&&<section className="panel pad returns-form-panel">
+      <div className="panel-heading"><div><h3>1. Localizar venta</h3><p>Escanea un código o busca la venta original.</p></div></div>
+      <form className="origin-search" onSubmit={searchSale}>
+        <input type="search" aria-label="Serie, código, cliente o número de venta" placeholder="Serie, SKU, código de barras, cliente o N.º venta" value={query} maxLength={120} disabled={locked||searchBusy} onChange={e=>{setQuery(e.target.value);setSearchResults(null);setSearchError('');}}/>
+        <button className="primary" disabled={locked||searchBusy||!query.trim()}>{searchBusy?'Buscando…':'Buscar'}</button>
+      </form>
+      {searchError&&<p role="alert" className="warning-box">{searchError}</p>}
+      {searchResults&&<div className="returns-line-list" aria-live="polite">
+        {searchResults.series?.length>0&&<h4>Coincidencias por serie vigente</h4>}
+        {(searchResults.series||[]).map(r=><div className="returns-line" key={r.sale_id+'-'+r.sale_item_id+'-'+r.serial_number}><div><strong>{r.product_name} · {r.serial_number}</strong><small>Venta #{r.sale_id} · {r.client_name||'Cliente no registrado'} · {dateChile(r.created_at)}</small></div><button type="button" className="ghost" disabled={locked} onClick={()=>chooseSale(r.sale_id,r)}>Seleccionar serie</button></div>)}
+        {searchResults.sales?.length>0&&<h4>Ventas encontradas</h4>}
+        {(searchResults.sales||[]).map(r=><div className="returns-line" key={r.sale_id}><div><strong>Venta #{r.sale_id} · {pesos(r.total_clp)}</strong><small>{r.client_name||'Cliente no registrado'} · {dateChile(r.created_at)}</small></div><button type="button" className="ghost" disabled={locked} onClick={()=>chooseSale(r.sale_id)}>Abrir venta</button></div>)}
+        {!searchResults.series?.length&&!searchResults.sales?.length&&<p className="muted">No se encontraron ventas directas vigentes. Comprueba el código o consulta el historial de trazabilidad.</p>}
+        {searchResults.more&&<p className="helper">Hasta 50 resultados por tipo. Acota la búsqueda.</p>}
+      </div>}
+      <details><summary>Seleccionar una venta manualmente</summary><label>Venta registrada
+        <select value={saleId} disabled={locked} onChange={e=>chooseSale(e.target.value)}>
           <option value="">Selecciona una venta</option>
           {sales.filter(s=>(s.status||'completed')==='completed').map(s=><option key={s.id} value={s.id}>
             Venta #{s.id} · {pesos(s.total_clp)} · {dateChile(s.created_at)}
           </option>)}
           {saleId&&!sales.some(s=>String(s.id)===saleId)&&<option value={saleId}>Venta #{saleId}</option>}
         </select>
-      </label>
-      {detail&&<form className="formstack" onSubmit={submit}>
+      </label></details>
+      {detail&&String(detail.sale_id)===String(saleId)&&<form className="formstack" onSubmit={submit}>
+        <div className="panel-heading"><div><h3>2. Revisar venta #{detail.sale_id}</h3><p>{detail.client_name||'Cliente no registrado'} · {dateChile(detail.sale_created_at)}{age!==null?' · '+age+' día(s) desde la venta':''}</p></div><button type="button" className="ghost" disabled={locked} onClick={()=>chooseSale('')}>Cambiar venta</button></div>
+        <p className="helper">La devolución comercial depende de la política de la empresa. Los días son informativos y no bloquean garantías ni otros derechos legales. Si la entrega fue posterior a la venta, verifica su fecha real.</p>
+        <h3>3. Seleccionar motivo y productos</h3>
         <div className="returns-choice-grid">
           <label>Situación del producto
             <select value={returnKind} disabled={locked} onChange={e=>{setReturnKind(e.target.value);setInspectionConfirmed(false);}}>
@@ -243,9 +302,9 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
         <h3>Devoluciones de esta venta</h3>
         {detail.returns.map(r=><p key={r.id}>#{r.id} · {kindLabels[r.return_kind]} · {pesos(r.amount_clp)} · {resolutionLabels[r.resolution]}{r.serial_numbers?.length>0&&<small className="sub">Series: {r.serial_numbers.join(', ')}</small>}</p>)}
       </div>}
-    </section>
+    </section>}
 
-    <section className="panel returns-history">
+    {view==='history'&&<section className="panel returns-history">
       <div className="panel-heading pad"><div><h3>Últimas devoluciones</h3><p>Historial auditable del negocio</p></div>
         <button className="ghost" type="button" disabled={loading} onClick={()=>void loadHistory()}>↻ Actualizar</button>
       </div>
@@ -255,7 +314,7 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
         <table><thead><tr><th>Registro</th><th>Venta</th><th>Tipo</th><th>Solución</th><th>Monto</th><th>Reembolso</th></tr></thead>
           <tbody>{historyPageData.rows.map(r=><tr key={r.id}>
             <td><strong>#{r.id}</strong><small className="sub">{dateChile(r.created_at)}</small></td>
-            <td><button type="button" className="ghost mini" onClick={()=>setSaleId(String(r.sale_id))}>#{r.sale_id}</button></td>
+            <td><button type="button" className="ghost mini" disabled={locked} onClick={()=>chooseSale(r.sale_id)}>#{r.sale_id}</button></td>
             <td>{kindLabels[r.return_kind]}</td>
             <td>{resolutionLabels[r.resolution]}</td>
             <td><strong>{pesos(r.amount_clp)}</strong></td>
@@ -268,9 +327,9 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
       </div>
       <div className="list-pagination"><span>{historyPageData.total} devoluciones filtradas · Página {historyPageData.page} de {historyPageData.pages}</span><div className="inline-actions"><button type="button" className="ghost mini" disabled={historyPageData.page<=1} onClick={()=>setHistoryPage(p=>p-1)}>← Anterior</button><button type="button" className="ghost mini" disabled={historyPageData.page>=historyPageData.pages} onClick={()=>setHistoryPage(p=>p+1)}>Siguiente →</button></div></div>
       <p className="helper pad">Los productos por garantía se registran fuera del inventario vendible. Un reembolso confirmado aquí no mueve dinero ni emite notas de crédito del SII.</p>
-    </section>
+    </section>}
 
-    {creditHistory.length>0&&<section className="panel returns-history">
+    {view==='history'&&creditHistory.length>0&&<section className="panel returns-history">
       <div className="panel-heading pad"><div><h3>Devoluciones y anulaciones a crédito</h3><p>Historial separado del libro de cuentas por cobrar</p></div></div>
       <div className="table-wrap"><table><thead><tr><th>Operación</th><th>Venta</th><th>Cliente</th><th>Tipo</th><th>Importe ajustado</th><th>Motivo</th></tr></thead>
         <tbody>{creditPageData.rows.map(a=><tr key={a.id}>

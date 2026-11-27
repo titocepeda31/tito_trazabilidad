@@ -86,7 +86,7 @@ function registerDelegatedPermissionsRoutes(RouteCollectorProxy $group): void {
         $body=requestBody($request);
         if(array_diff(array_keys($body),['sale'])||count($body)!==1)fail('Datos inválidos.',422);
         $sale=$body['sale']??null;
-        if(!is_array($sale)||array_diff(array_keys($sale),['request_id','payment_method','items','warehouse_id']))fail('Venta inválida.',422);
+        if(!is_array($sale)||array_diff(array_keys($sale),['request_id','payment_method','items','warehouse_id','client_id','customer_mode']))fail('Venta inválida.',422);
         $db=db();$biz=(int)$user['business_id'];$uid=(int)$user['id'];
         titoSaleLocation($db,$user,$sale['warehouse_id']??null,true,$request);
         $snapshot=titoRemoteDiscountSnapshot($db,$biz,$sale);

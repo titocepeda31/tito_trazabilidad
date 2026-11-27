@@ -37,7 +37,8 @@ function titoSaleDiscountFingerprint(array $sale): string {
         'request_id'=>strtolower($rid),
         'payment_method'=>$payment,
         'warehouse_id'=>$sale['warehouse_id']??null,
-        'items'=>array_values($normalized)
+        'items'=>array_values($normalized),
+        ...(array_key_exists('customer_mode',$sale)||array_key_exists('client_id',$sale)?['customer_mode'=>$sale['customer_mode']??null,'client_id'=>$sale['client_id']??null]:[])
     ],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
 }
 
@@ -69,7 +70,7 @@ function registerDiscountApprovalRoutes(RouteCollectorProxy $group): void {
         $biz=(int)$user['business_id'];$uid=(int)$user['id'];$b=requestBody($request);
         if(array_diff(array_keys($b),['sale','supervisor_email','supervisor_password']))fail('Campos inesperados.',422);
         $sale=$b['sale']??null;
-        if(!is_array($sale)||array_diff(array_keys($sale),['request_id','payment_method','items','warehouse_id']))fail('Venta a autorizar inválida.',422);
+        if(!is_array($sale)||array_diff(array_keys($sale),['request_id','payment_method','items','warehouse_id','client_id','customer_mode']))fail('Venta a autorizar inválida.',422);
         $email=$b['supervisor_email']??null;$password=$b['supervisor_password']??null;
         if(!is_string($email)||!filter_var($email,FILTER_VALIDATE_EMAIL)||!is_string($password)||$password==='')fail('Credenciales de supervisor inválidas.',422);
         $email=strtolower(trim($email));

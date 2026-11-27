@@ -129,7 +129,7 @@ function registerRemoteDiscountRoutes(RouteCollectorProxy $group): void {
         $body=requestBody($request);
         if(array_diff(array_keys($body),['sale'])||!isset($body['sale'])||!is_array($body['sale']))fail('Solicitud inválida.',422);
         $sale=$body['sale'];
-        if(array_diff(array_keys($sale),['request_id','payment_method','items','warehouse_id']))fail('La solicitud contiene campos no permitidos.',422);
+        if(array_diff(array_keys($sale),['request_id','payment_method','items','warehouse_id','client_id','customer_mode']))fail('La solicitud contiene campos no permitidos.',422);
         $biz=(int)$user['business_id'];$uid=(int)$user['id'];$db=db();
         titoSaleLocation($db,$user,$sale['warehouse_id']??null,true,$request);
         $snapshot=titoRemoteDiscountSnapshot($db,$biz,$sale);

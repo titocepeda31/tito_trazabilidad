@@ -100,7 +100,8 @@ function registerSerialRoutes(RouteCollectorProxy $group): void {
     $group->get('/sales/serial-clients',static function(Request $request,Response $response): Response {
         $u=$request->getAttribute('currentUser');$biz=(int)$u['business_id'];
         $q=$request->getQueryParams()['q']??'';if(!is_string($q)||mb_strlen($q)>120)fail('Búsqueda inválida.',422);
-        $s=db()->prepare('SELECT id,name FROM habitual_clients WHERE business_id=? AND is_active=1 AND name LIKE ? ORDER BY name,id LIMIT 100');$s->execute([$biz,'%'.trim($q).'%']);
+        $q=trim($q);$rut=strtoupper(preg_replace('/[.\s-]+/u','',$q)??'');
+        $s=db()->prepare("SELECT id,name,rut FROM habitual_clients WHERE business_id=? AND is_active=1 AND (LOCATE(?,name)>0 OR (?<>'' AND LOCATE(?,REPLACE(COALESCE(rut,''),'-',''))>0)) ORDER BY name,id LIMIT 100");$s->execute([$biz,$q,$rut,$rut]);
         return respond($response,['clients'=>$s->fetchAll()]);
     });
     $group->get('/sales/serial-available',static function(Request $request,Response $response): Response {

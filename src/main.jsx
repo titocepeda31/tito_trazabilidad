@@ -68,6 +68,7 @@ function App() {
   const [user, setUser] = useState(() => { try { return JSON.parse(sessionStorage.getItem('tito_user') || 'null'); } catch { return null; } });
   const [staffPermissions,setStaffPermissions] = useState({can_approve_discounts:false,can_sell_credit:false});
   const [page, setPage] = useState('inicio');
+  const [creatingSaleClient,setCreatingSaleClient]=useState(false),[saleClientResult,setSaleClientResult]=useState(null);
   const [newSaleRequest,setNewSaleRequest] = useState(0);
   const [terminalVersion,setTerminalVersion]=useState(0);
   const [terminalStatus,setTerminalStatus]=useState(null);
@@ -324,7 +325,7 @@ function App() {
           <button type="button" className="primary" onClick={()=>setPage('caja')}>Ir a Rendición de caja · Abrir turno</button>
           <p className="helper">No se enviarán ventas ni abonos hasta confirmar una sesión abierta de esta sucursal.</p>
         </section>}
-        <div style={{display:page==='vender'&&salesScreenReady?'contents':'none'}}>{terminalCanSell&&cashCanSell&&<SellPanel key={'terminal-'+terminalVersion+'-'+terminalStatus.terminal.id+'-'+cashStatus.session.id} products={products} request={request} refresh={()=>refresh(false)} notify={notify} canDiscount={isAdmin} canApproveDiscount={canApproveDiscounts} canRegisterCredit={canSellCredit} isAdmin={isAdmin} terminalStatus={terminalStatus} cashStatus={cashStatus} onCashChanged={async()=>{try{setCashStatus(await api('/cash/current',{token}));}catch{setCashStatus(null);}}} onOpenCash={()=>setPage('caja')} onShowSales={()=>setPage('ventas')} businessName={user?.business_name||'Tito POS'} active={page==='vender'} newSaleRequest={newSaleRequest} />}</div>
+        <div style={{display:page==='vender'&&salesScreenReady?'contents':'none'}}>{terminalCanSell&&cashCanSell&&<SellPanel key={'terminal-'+terminalVersion+'-'+terminalStatus.terminal.id+'-'+cashStatus.session.id} products={products} request={request} refresh={()=>refresh(false)} notify={notify} canDiscount={isAdmin} canApproveDiscount={canApproveDiscounts} canRegisterCredit={canSellCredit} isAdmin={isAdmin} terminalStatus={terminalStatus} cashStatus={cashStatus} onCashChanged={async()=>{try{setCashStatus(await api('/cash/current',{token}));}catch{setCashStatus(null);}}} onOpenCash={()=>setPage('caja')} onShowSales={()=>setPage('ventas')} businessName={user?.business_name||'Tito POS'} active={page==='vender'} newSaleRequest={newSaleRequest} onCreateClient={isAdmin?()=>{setCreatingSaleClient(true);setPage('clientes');}:undefined} createdClient={saleClientResult} onClientConsumed={()=>setSaleClientResult(null)} />}</div>
         {page==='organizacion' && isAdmin && <OrganizationPanel request={request} notify={notify} />}
         {page==='puntosventa' && isAdmin && <SalesPointsPanel request={request}/>}
         {page==='origen' && isAdmin && <OriginCatalogPanel request={request}/>}
@@ -334,7 +335,7 @@ function App() {
         {page==='cuenta' && <AccountPanel user={user} request={request} notify={notify} onPasswordChanged={()=>{endSession();setPage('inicio');notify('Contraseña actualizada. Inicia sesión nuevamente.','success');}} />}
         {page==='ventas' && <SalesPanel sales={sales} onRefresh={()=>refresh(true)} request={request} notify={notify} canVoid={isAdmin} onStartReturn={id=>{setReturnSaleId(id);setPage('devoluciones');}} businessName={user?.business_name||'Tito POS'} />}
         {page==='devoluciones' && isAdmin && <ReturnsPanel sales={sales} request={request} notify={notify} initialSaleId={returnSaleId} onChange={()=>refresh(false)} />}
-        {page==='clientes' && isAdmin && <ClientsPanel request={request} notify={notify} onChange={()=>refresh(false)} />}
+        {page==='clientes' && isAdmin && <ClientsPanel request={request} notify={notify} onChange={()=>refresh(false)} createForSale={creatingSaleClient} onSaleClientDone={c=>{setCreatingSaleClient(false);if(c)setSaleClientResult(c);setPage('vender');}} />}
         {page==='cotizaciones' && isAdmin && <QuotesPanel products={products} request={request} notify={notify} onSale={()=>refresh(true)} businessName={user?.business_name||'Tito POS'} />}
         {page==='aprobaciones' && canApproveDiscounts && <RemoteApprovalsPanel requests={approvalRequests} request={request} notify={notify} onRefresh={refreshApprovals} loading={approvalLoading} canManagePush={isAdmin} />}
         {page==='mas' && <div className="more-page"><div className="section-intro"><div><p className="eyebrow">OPERACIONES</p><h2>Más herramientas</h2><p className="muted">Módulos de administración y control de inventario.</p></div></div><div className="more-menu">{visibleMenu.filter(m=>!['inicio','inventario','vender','ventas'].includes(m.key)).map(m=><button type="button" key={m.key} className="panel pad more-option" onClick={()=>setPage(m.key)}><span>{m.ico}</span><strong>{m.label}{m.key==='aprobaciones'&&pendingApprovals>0?' ('+pendingApprovals+')':''}</strong><span>→</span></button>)}</div></div>}
@@ -621,7 +622,7 @@ function ImportPanel({request,refresh,notify}) {
     {result&&<div className="success-summary"><strong>Importación finalizada</strong><p>Creados: {result.created} · Actualizados: {result.updated} · Sin cambios: {result.unchanged} · Stock ajustado: {result.stock_adjusted}</p></div>}</section>
   </>;
 }
-function SellPanel({ products, request, refresh, notify, canDiscount, canApproveDiscount, canRegisterCredit, isAdmin, terminalStatus, cashStatus, onCashChanged, onOpenCash, onShowSales, businessName, active, newSaleRequest }) {
+function SellPanel({ products, request, refresh, notify, canDiscount, canApproveDiscount, canRegisterCredit, isAdmin, terminalStatus, cashStatus, onCashChanged, onOpenCash, onShowSales, businessName, active, newSaleRequest, onCreateClient, createdClient, onClientConsumed }) {
   const [localById,setLocalById]=useState(null);
   const [reservedById,setReservedById]=useState({}),[dispatchReservation,setDispatchReservation]=useState(null);
   const [saleLocationId,setSaleLocationId]=useState(null);
@@ -664,6 +665,7 @@ function SellPanel({ products, request, refresh, notify, canDiscount, canApprove
   const [lastSale,setLastSale]=useState(()=>{try{return JSON.parse(sessionStorage.getItem('tito_last_sale')||'null');}catch{return null;}});
   const [remoteBusy,setRemoteBusy]=useState(false);
   const [serialClients,setSerialClients]=useState([]),[serialClient,setSerialClient]=useState(''),[serialClientQuery,setSerialClientQuery]=useState(''),[serialClientError,setSerialClientError]=useState('');
+  const [customerMode,setCustomerMode]=useState('consumer_final');
   const [creditClients,setCreditClients]=useState([]);
   const [creditClientId,setCreditClientId]=useState('');
   const [creditDueDate,setCreditDueDate]=useState('');
@@ -688,7 +690,7 @@ function SellPanel({ products, request, refresh, notify, canDiscount, canApprove
   function startNextSale(){
     if(pending||creditPending||approvalPlan)return;
     sessionStorage.removeItem('tito_last_sale');setLastSale(null);
-    setCart([]);setSearch('');setPayment('efectivo');setCreditClientId('');setCreditDueDate('');setCreditNotes('');
+    setCart([]);resetCustomer();setSearch('');setPayment('efectivo');setCreditClientId('');setCreditDueDate('');setCreditNotes('');
     inputRef.current?.focus();
   }
   useEffect(()=>{if(newSaleRequest>0)startNextSale();},[newSaleRequest]);
@@ -699,12 +701,16 @@ function SellPanel({ products, request, refresh, notify, canDiscount, canApprove
   const discountTotal=Math.max(0,listTotal-total);
   const lock=!!pending||!!creditPending||!!approvalPlan||!!lastSale;
   const hasSerialCart=cart.some(c=>Number(c.product.serial_control)===1);
-  async function searchSerialClients(){setSerialClientError('');try{const d=await request('/sales/serial-clients?q='+encodeURIComponent(serialClientQuery));setSerialClients(d.clients||[]);setSerialClient(old=>(d.clients||[]).some(c=>String(c.id)===old)?old:'');}catch(e){setSerialClientError(e.message);}}
-  useEffect(()=>{if(hasSerialCart&&!lock&&!dispatchReservation)void searchSerialClients();},[hasSerialCart,dispatchReservation]);
+  const customerSearchVersion=useRef(0);
+  async function searchSerialClients(){const version=++customerSearchVersion.current;setSerialClientError('');try{const d=await request('/sales/serial-clients?q='+encodeURIComponent(serialClientQuery));if(version!==customerSearchVersion.current)return;setSerialClients(old=>{const found=d.clients||[];const chosen=old.find(c=>String(c.id)===serialClient);return chosen&&!found.some(c=>String(c.id)===serialClient)?[chosen,...found]:found;});}catch(e){if(version===customerSearchVersion.current)setSerialClientError(e.message);}}
+  useEffect(()=>{if(hasSerialCart)setCustomerMode('registered');},[hasSerialCart]);
+  useEffect(()=>{if(active&&payment!=='credito'&&(hasSerialCart||customerMode==='registered')&&!lock&&!dispatchReservation)void searchSerialClients();},[active,hasSerialCart,customerMode,dispatchReservation,payment]);
+  useEffect(()=>{if(!createdClient)return;customerSearchVersion.current++;setSerialClients(old=>[createdClient,...old.filter(c=>String(c.id)!==String(createdClient.id))]);setSerialClient(String(createdClient.id));setCustomerMode('registered');setSerialClientQuery('');onClientConsumed?.();},[createdClient]);
+  function resetCustomer(){customerSearchVersion.current++;setCustomerMode('consumer_final');setSerialClient('');setSerialClientQuery('');setSerialClients([]);setSerialClientError('');}
   async function findSaleSeries(id,loc,q=''){setCart(c=>c.map(x=>x.product.id===id?{...x,serialBusy:true,serialError:''}:x));try{const d=await request('/sales/serial-available?product_id='+id+'&warehouse_id='+loc+'&q='+encodeURIComponent(q));setCart(c=>c.map(x=>x.product.id===id&&x.serialWarehouse===loc?{...x,available:d.units||[],serialMore:d.more,serialBusy:false}:x));}catch(e){setCart(c=>c.map(x=>x.product.id===id&&x.serialWarehouse===loc?{...x,serialError:e.message,serialBusy:false}:x));}}
   function add(product) {if(lock||dispatchReservation)return;const controlled=Number(product.serial_control)===1;if(controlled&&cart.some(x=>x.product.id===product.id)){setSearch('');return;}
     setCart(c=>{const existing=c.find(x=>x.product.id===product.id);return existing ? c.map(x=>x.product.id===product.id?{...x,quantity:String((Number(x.quantity)||0)+1)}:x):[...c,{product,quantity:controlled?'0':'1',unitPrice:Number(product.price_clp),discountReason:'Precio negociado',serials:[],available:[],serialSearch:'',serialWarehouse:saleLocationId,serialBusy:controlled}];});setSearch('');if(controlled)void findSaleSeries(product.id,saleLocationId);}
-  function prepareDispatch(r){if(lock||busy||cart.length){notify('Vacía el carrito antes de preparar una reserva.','error');return;}const rows=r.items.map(i=>({item:i,product:saleProducts.find(p=>Number(p.id)===Number(i.product_id))}));if(rows.some(x=>!x.product)){notify('No se pudo cargar uno de los productos reservados.','error');return;}setDispatchReservation(r);setSerialClients([{id:r.client_id,name:r.client_name}]);setSerialClient(String(r.client_id));setPayment('efectivo');setCart(rows.map(({product})=>({product,quantity:'0',unitPrice:Number(product.price_clp),discountReason:'Precio negociado',serials:[],available:[],serialSearch:'',serialWarehouse:saleLocationId,serialBusy:true})));for(const {product} of rows)void findSaleSeries(product.id,saleLocationId);}
+  function prepareDispatch(r){if(lock||busy||cart.length){notify('Vacía el carrito antes de preparar una reserva.','error');return;}const rows=r.items.map(i=>({item:i,product:saleProducts.find(p=>Number(p.id)===Number(i.product_id))}));if(rows.some(x=>!x.product)){notify('No se pudo cargar uno de los productos reservados.','error');return;}setDispatchReservation(r);setCustomerMode('registered');setSerialClients([{id:r.client_id,name:r.client_name}]);setSerialClient(String(r.client_id));setPayment('efectivo');setCart(rows.map(({product})=>({product,quantity:'0',unitPrice:Number(product.price_clp),discountReason:'Precio negociado',serials:[],available:[],serialSearch:'',serialWarehouse:saleLocationId,serialBusy:true})));for(const {product} of rows)void findSaleSeries(product.id,saleLocationId);}
   function toggleSaleSeries(id,n,checked){setCart(c=>c.map(x=>{if(x.product.id!==id)return x;const serials=checked?[...new Set([...x.serials,n])]:x.serials.filter(s=>s!==n);return {...x,serials,quantity:String(serials.length)};}));}
 
   function scan(e) {if(e.key!=='Enter')return;e.preventDefault();const code=search.trim();if(!code)return;const found=saleProducts.find(p=>String(p.barcode??'')===code||String(p.sku??'')===code);if(found)add(found);else notify('No existe un producto con ese código.','error');}
@@ -720,7 +726,7 @@ function SellPanel({ products, request, refresh, notify, canDiscount, canApprove
       const receipt={id:Number(result.sale_id),total:Number(result.total_clp),payment:'credito',is_credit:true,items:salePayload.items.length,when:new Date().toISOString()};
       sessionStorage.setItem('tito_last_sale',JSON.stringify(receipt));setLastSale(receipt);
       sessionStorage.removeItem('tito_pending_credit_sale');setCreditPending(null);
-      setCart([]);setSearch('');setPayment('efectivo');setCreditClientId('');setCreditDueDate('');setCreditNotes('');
+      setCart([]);resetCustomer();setSearch('');setPayment('efectivo');setCreditClientId('');setCreditDueDate('');setCreditNotes('');
       notify(result.already_recorded?'Esta venta a crédito ya estaba registrada.':'Venta a crédito #'+receipt.id+' registrada; el pago quedó PENDIENTE.','success');
       await refresh();await loadStoreStock();
     }catch(err){
@@ -753,7 +759,7 @@ function SellPanel({ products, request, refresh, notify, canDiscount, canApprove
       notify('Venta #'+receipt.id+' registrada correctamente.','success');
       await onCashChanged();
       sessionStorage.removeItem('tito_pending_sale');setPending(null);
-      setDispatchReservation(null);setCart([]);setSerialClient('');setSerialClientQuery('');setSearch('');refresh();loadStoreStock();
+      setDispatchReservation(null);setCart([]);resetCustomer();setSearch('');refresh();loadStoreStock();
     } catch(e) {
       if (e.status>=400 && e.status<500 && e.status!==408 && e.status!==429) {
         sessionStorage.removeItem('tito_pending_sale');setPending(null);
@@ -772,6 +778,7 @@ function SellPanel({ products, request, refresh, notify, canDiscount, canApprove
     }
     if(dispatchReservation&&dispatchReservation.items.some(i=>cart.find(c=>Number(c.product.id)===Number(i.product_id))?.serials.length!==Number(i.quantity))){notify('Selecciona exactamente las unidades reservadas.','error');return;}
     if(hasSerialCart){if(!serialClient){notify('Selecciona el cliente de los equipos.','error');return;}if(payment==='credito'){notify('Venta a crédito por serie pendiente de integración.','error');return;}if(!canDiscount&&discountTotal>0){notify('Descuento autorizado por terceros pendiente para ventas por serie.','error');return;}if(cart.some(c=>Number(c.product.serial_control)===1&&(c.serials.length!==Number(c.quantity)||c.serials.length>500))){notify('Selecciona una serie por unidad.','error');return;}}
+    if(payment!=='credito'&&(hasSerialCart||customerMode==='registered')&&!serialClient){notify('Selecciona un cliente registrado.','error');return;}
     if(payment==='credito'){
       if(!canRegisterCredit){notify('No estás habilitado para registrar ventas a crédito.','error');return;}
       if(!canApproveDiscount&&cart.some(c=>Number(c.unitPrice)<Number(c.product.price_clp))){notify('Para fiar con descuento también necesitas permiso para autorizar descuentos.','error');return;}
@@ -784,7 +791,7 @@ function SellPanel({ products, request, refresh, notify, canDiscount, canApprove
       sessionStorage.setItem('tito_pending_credit_sale',JSON.stringify(body));setCreditPending(body);void registerCredit(body);
       return;
     }
-    const body={request_id:newId(),warehouse_id:saleLocationId,payment_method:payment,...(hasSerialCart?{serial_client_id:Number(serialClient)}:{}),...(dispatchReservation?{reservation_id:Number(dispatchReservation.id)}:{}),items:cart.map(c=>({
+    const body={request_id:newId(),warehouse_id:saleLocationId,payment_method:payment,customer_mode:hasSerialCart?'registered':customerMode,...(hasSerialCart||customerMode==='registered'?{client_id:Number(serialClient)}:{}),...(dispatchReservation?{reservation_id:Number(dispatchReservation.id)}:{}),items:cart.map(c=>({
       product_id:Number(c.product.id),quantity:Number(c.quantity),...(Number(c.product.serial_control)===1?{serial_numbers:c.serials}:{}),
       ...(Number(c.unitPrice)<Number(c.product.price_clp)?{unit_price_clp:Number(c.unitPrice),discount_reason:c.discountReason||'Precio negociado'}:{})
     }))};
@@ -825,7 +832,7 @@ function SellPanel({ products, request, refresh, notify, canDiscount, canApprove
       // Esta venta queda aparcada en su propia solicitud. El siguiente cliente
       // recibe un carrito completamente nuevo, sin mezclar productos ni pagos.
       setApprovalPlan(null);setApprovalPassword('');setApprovalEmail('');
-      setCart([]);setSearch('');setPayment('efectivo');
+      setCart([]);resetCustomer();setSearch('');setPayment('efectivo');
       notify('Solicitud #'+id+' enviada. Puedes atender al siguiente cliente mientras se autoriza.','success');
       void loadStoreStock();
     }catch(error){
@@ -873,7 +880,11 @@ function SellPanel({ products, request, refresh, notify, canDiscount, canApprove
           <div className="item-subtotal">Subtotal: <strong>{pesos(Number(c.unitPrice)*c.quantity)}</strong></div>
         </div>;
       })}</div>}
-      <div className="cart-bottom">{hasSerialCart&&<div><p className="helper">Entrega inmediata desde la bodega de caja. Las reservas y el despacho posterior se integrarán después.</p><label>Buscar cliente<input value={serialClientQuery} disabled={lock||!!dispatchReservation} maxLength={120} onChange={e=>setSerialClientQuery(e.target.value)}/></label><button type="button" className="ghost mini" disabled={lock||!!dispatchReservation} onClick={searchSerialClients}>Buscar</button><label>Cliente de los equipos<select value={serialClient} disabled={lock||!!dispatchReservation} onChange={e=>setSerialClient(e.target.value)}><option value="">Selecciona cliente</option>{serialClients.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></label>{serialClientError&&<p role="alert">{serialClientError}</p>}</div>}{!canApproveDiscount&&discountTotal>0&&<p className="discount-approval-notice"><strong>Se requiere autorización del administrador.</strong> El cajero no puede completar esta venta con descuento sin su aprobación.</p>}<label>Medio de pago<select value={payment} onChange={e=>setPayment(e.target.value)} disabled={lock}><option value="efectivo">Efectivo</option><option value="transferencia">Transferencia</option><option value="tarjeta">Tarjeta</option><option value="otro">Otro</option>{canRegisterCredit&&<option value="credito">Crédito · pagar después</option>}</select></label>{payment==='credito'&&canRegisterCredit&&<div className="credit-checkout-fields">
+      <div className="cart-bottom">{payment!=='credito'&&<div className="formstack">
+        <label>Identificación del cliente<select value={hasSerialCart?'registered':customerMode} disabled={lock||busy||hasSerialCart||!!dispatchReservation} onChange={e=>{setCustomerMode(e.target.value);if(e.target.value==='consumer_final'){customerSearchVersion.current++;setSerialClient('');setSerialClientQuery('');}}}><option value="consumer_final" disabled={hasSerialCart}>Consumidor final</option><option value="registered">Cliente registrado</option></select></label>
+        {hasSerialCart&&<p className="helper">La venta contiene equipos con número de serie: requiere un cliente registrado.</p>}
+        {(hasSerialCart||customerMode==='registered')&&<><label>Buscar por nombre o RUT<input value={serialClientQuery} disabled={lock||busy||!!dispatchReservation} maxLength={120} onChange={e=>setSerialClientQuery(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();void searchSerialClients();}}}/></label><button type="button" className="ghost mini" disabled={lock||busy||!!dispatchReservation} onClick={searchSerialClients}>Buscar cliente</button><label>Cliente<select value={serialClient} disabled={lock||busy||!!dispatchReservation} onChange={e=>setSerialClient(e.target.value)}><option value="">Selecciona cliente</option>{serialClients.map(c=><option key={c.id} value={c.id}>{c.name}{c.rut?' · '+c.rut:''}</option>)}</select></label>{serialClientError&&<p role="alert">{serialClientError}</p>}{onCreateClient&&!dispatchReservation&&<button type="button" className="ghost" disabled={lock||busy} onClick={onCreateClient}>+ Nuevo cliente</button>}{!onCreateClient&&<p className="helper">Solicita al administrador el registro de un nuevo cliente.</p>}</>}
+      </div>}{!canApproveDiscount&&discountTotal>0&&<p className="discount-approval-notice"><strong>Se requiere autorización del administrador.</strong> El cajero no puede completar esta venta con descuento sin su aprobación.</p>}<label>Medio de pago<select value={payment} onChange={e=>setPayment(e.target.value)} disabled={lock}><option value="efectivo">Efectivo</option><option value="transferencia">Transferencia</option><option value="tarjeta">Tarjeta</option><option value="otro">Otro</option>{canRegisterCredit&&<option value="credito">Crédito · pagar después</option>}</select></label>{payment==='credito'&&canRegisterCredit&&<div className="credit-checkout-fields">
         <p className="warning-box">Esta operación entregará mercadería ahora y dejará todo el monto como deuda pendiente. No se contabiliza como dinero recibido.</p>
         <label>Cliente habitual autorizado<select value={creditClientId} disabled={lock} onChange={e=>setCreditClientId(e.target.value)}>
           <option value="">Selecciona cliente</option>{creditClients.filter(c=>Number(c.is_active)===1&&Number(c.credit_enabled)===1).map(c=><option value={c.id} key={c.id}>{c.name} · Límite {pesos(c.credit_limit_clp)} · Debe {pesos(c.outstanding_clp||0)}</option>)}
@@ -1000,7 +1011,7 @@ function SalesPanel({sales,onRefresh,request,notify,canVoid,onStartReturn,busine
         <label>Período<select value={salesPeriod} onChange={e=>setSalesPeriod(e.target.value)}><option value="all">Últimas cargadas</option><option value="today">Hoy</option><option value="week">Esta semana</option><option value="month">Este mes</option></select></label>
         <label>Estado<select value={salesStatus} onChange={e=>setSalesStatus(e.target.value)}><option value="all">Todas</option><option value="completed">Vigentes</option><option value="voided">Anuladas</option></select></label>
       </div><p className="list-filter-note">Los filtros y páginas se aplican solo a las últimas {sales.length} ventas descargadas (máximo 100); no consultan el historial completo del servidor.</p>
-      <div className="table-wrap"><table><thead><tr><th>Venta</th><th>Fecha Chile</th><th>Vendedor</th><th>Sucursal</th><th>Medio</th><th>Estado</th><th>Total</th><th>Detalle</th></tr></thead><tbody>{salesPageData.rows.map(s=><tr key={s.id}><td><strong>#{s.id}</strong></td><td>{timeChile(s.created_at)}</td><td>{s.seller_email||'—'}</td><td>{s.warehouse_name||'Local original'}</td><td className="capitalize">{creditSales[s.id]?"Crédito":s.payment_method}</td><td><span className={'pill '+((s.status||'completed')==='voided'?'amber':'green')}>{(s.status||'completed')==='voided'?'Anulada':'Vigente'}</span></td><td><strong className={(s.status||'completed')==='voided'?'muted':''}>{pesos(s.total_clp)}</strong></td><td><button className="ghost mini" disabled={busy} onClick={()=>openSale(s.id)}>Ver</button></td></tr>)}</tbody></table>{filteredSales.length===0&&<Empty text={sales.length===0?"Todavía no hay ventas registradas.":"No hay ventas que coincidan con estos filtros en los registros cargados."}/>}</div>
+      <div className="table-wrap"><table><thead><tr><th>Venta</th><th>Cliente</th><th>Fecha Chile</th><th>Vendedor</th><th>Sucursal</th><th>Medio</th><th>Estado</th><th>Total</th><th>Detalle</th></tr></thead><tbody>{salesPageData.rows.map(s=><tr key={s.id}><td><strong>#{s.id}</strong></td><td>{s.client_name||(s.customer_mode==='consumer_final'?'Consumidor final':'—')}</td><td>{timeChile(s.created_at)}</td><td>{s.seller_email||'—'}</td><td>{s.warehouse_name||'Local original'}</td><td className="capitalize">{creditSales[s.id]?"Crédito":s.payment_method}</td><td><span className={'pill '+((s.status||'completed')==='voided'?'amber':'green')}>{(s.status||'completed')==='voided'?'Anulada':'Vigente'}</span></td><td><strong className={(s.status||'completed')==='voided'?'muted':''}>{pesos(s.total_clp)}</strong></td><td><button className="ghost mini" disabled={busy} onClick={()=>openSale(s.id)}>Ver</button></td></tr>)}</tbody></table>{filteredSales.length===0&&<Empty text={sales.length===0?"Todavía no hay ventas registradas.":"No hay ventas que coincidan con estos filtros en los registros cargados."}/>}</div>
       <div className="list-pagination"><span>{salesPageData.total} ventas encontradas · Página {salesPageData.page} de {salesPageData.pages}</span><div className="inline-actions"><button type="button" className="ghost mini" disabled={salesPageData.page<=1} onClick={()=>setSalesPage(p=>p-1)}>← Anterior</button><button type="button" className="ghost mini" disabled={salesPageData.page>=salesPageData.pages} onClick={()=>setSalesPage(p=>p+1)}>Siguiente →</button></div></div></section>
     {detail&&<Modal title={'Venta #'+detail.sale.id+' · '+(detail.sale.warehouse_name||'Local original')} onClose={()=>setDetail(null)}>
       {detail.sale.status==='voided'&&<div className="warning-box"><strong>Venta anulada</strong><p>Motivo: {detail.sale.void_reason||'No informado'}</p><p>Por: {detail.sale.voided_by_email||'Administrador'} · {timeChile(detail.sale.voided_at)}</p></div>}
@@ -1013,7 +1024,7 @@ function SalesPanel({sales,onRefresh,request,notify,canVoid,onStartReturn,busine
         <p className="helper">Se abrirá un PDF con el detalle de esta venta; podrás imprimirlo o guardarlo desde el navegador.</p>
       </div>
       {canVoid&&detail.sale.status!=='voided'&&creditSales[detail.sale.id]&&<p className="warning-box">Esta venta es a crédito. Para registrar una devolución, una anulación completa o un reembolso, usa Más → Clientes → Crédito heredado → Cuentas por cobrar → Ver / gestionar. Allí se ajustan conjuntamente deuda e inventario.</p>}
-      {detail.sale.serial_client_name&&<p><strong>Cliente:</strong> {detail.sale.serial_client_name}.</p>}
+      {(detail.sale.client_name||detail.sale.serial_client_name||detail.sale.customer_mode==='consumer_final')&&<p><strong>Cliente:</strong> {detail.sale.client_name||detail.sale.serial_client_name||'Consumidor final'}{detail.sale.client_rut?' · '+detail.sale.client_rut:''}</p>}
       {canVoid&&detail.sale.status!=='voided'&&!creditSales[detail.sale.id]&&<div className="sale-return-actions"><button className="primary wide" type="button" disabled={busy} onClick={()=>{setDetail(null);onStartReturn(detail.sale.id);}}>↩ Registrar devolución de productos</button>
         {returnCount===0?<button className="ghost wide danger-button" disabled={busy} onClick={()=>setVoidTarget(detail.sale)}>Anular esta venta y reponer todo el stock</button>:<p className="helper">{returnCount>0?'Esta venta ya tiene devoluciones: no corresponde una anulación total.': 'La anulación total requiere verificar el historial de devoluciones en la API.'}</p>}
       </div>}

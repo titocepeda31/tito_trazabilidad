@@ -94,11 +94,11 @@ function registerCustomerReturnRoutes(RouteCollectorProxy $group): void {
             ORDER BY s.id DESC,x.id LIMIT 51";
         $st=db()->prepare($serialSql);$st->execute([$biz,$q]);$series=$st->fetchAll();$st->closeCursor();
         $saleCode=ltrim($q,'#');
-        $saleSql="SELECT s.id AS sale_id,s.created_at,s.total_clp,ss.client_name
+        $saleSql="SELECT s.id AS sale_id,s.created_at,s.total_clp,COALESCE(s.client_name_snapshot,ss.client_name) AS client_name
             FROM sales s LEFT JOIN serial_sale_snapshots ss ON ss.sale_id=s.id AND ss.business_id=s.business_id
             WHERE s.business_id=? AND s.status='completed'
             AND NOT EXISTS(SELECT 1 FROM credit_accounts ca WHERE ca.business_id=s.business_id AND ca.sale_id=s.id)
-            AND (CAST(s.id AS CHAR)=? OR LOCATE(?,COALESCE(ss.client_name,''))>0
+            AND (CAST(s.id AS CHAR)=? OR LOCATE(?,COALESCE(s.client_name_snapshot,ss.client_name,''))>0
             OR EXISTS(SELECT 1 FROM sale_items si JOIN products p ON p.id=si.product_id AND p.business_id=s.business_id
                 WHERE si.sale_id=s.id AND (p.sku=? OR p.barcode=? OR LOCATE(?,si.product_name_snapshot)>0)))
             ORDER BY s.id DESC LIMIT 51";
@@ -108,7 +108,7 @@ function registerCustomerReturnRoutes(RouteCollectorProxy $group): void {
 
     $group->get('/sales/{id:[0-9]+}/returns',static function(Request $request,Response $response,array $args): Response {
         $admin=adminOnly($request);$biz=(int)$admin['business_id'];$saleId=(int)$args['id'];
-        $st=db()->prepare('SELECT s.id,s.status,s.created_at,s.total_clp,ss.client_name FROM sales s LEFT JOIN serial_sale_snapshots ss ON ss.sale_id=s.id AND ss.business_id=s.business_id WHERE s.id=? AND s.business_id=?');
+        $st=db()->prepare('SELECT s.id,s.status,s.created_at,s.total_clp,COALESCE(s.client_name_snapshot,ss.client_name) AS client_name FROM sales s LEFT JOIN serial_sale_snapshots ss ON ss.sale_id=s.id AND ss.business_id=s.business_id WHERE s.id=? AND s.business_id=?');
         $st->execute([$saleId,$biz]);$sale=$st->fetch();
         if(!$sale)fail('Venta no encontrada.',404);
         $st=db()->prepare('SELECT si.id AS sale_item_id,si.product_id,si.product_name_snapshot,si.quantity,si.unit_price_clp,si.subtotal_clp,p.sale_unit,COALESCE(SUM(ri.quantity),0) AS returned_qty,COALESCE(SUM(ri.amount_clp),0) AS returned_amount_clp FROM sale_items si JOIN products p ON p.id=si.product_id AND p.business_id=? LEFT JOIN customer_return_items ri ON ri.sale_item_id=si.id WHERE si.sale_id=? GROUP BY si.id,si.product_id,si.product_name_snapshot,si.quantity,si.unit_price_clp,si.subtotal_clp,p.sale_unit ORDER BY si.id');

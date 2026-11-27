@@ -13,7 +13,7 @@ const dateChile=s=>{
 };
 export default function ClientsPanel(props){
   const [tab,setTab]=useState('commercial'),[editing,setEditing]=useState(false);
-  return <>{!editing&&<div className="role-nav" aria-label="Gestión de clientes">
+  return <>{!editing&&!props.createForSale&&<div className="role-nav" aria-label="Gestión de clientes">
     <button type="button" className={tab==='commercial'?'primary':'ghost'} onClick={()=>setTab('commercial')}>Clientes</button>
     <button type="button" className={tab==='credit'?'primary':'ghost'} onClick={()=>setTab('credit')}>Crédito heredado</button>
   </div>}{tab==='commercial'?<CommercialClientsPanel {...props} onEditingChange={setEditing}/>:<LegacyCreditPanel {...props}/>}</>;

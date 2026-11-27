@@ -194,7 +194,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
     $group->get('/sales',static function(Request $request,Response $response): Response {
         $user=$request->getAttribute('currentUser');
         $biz=(int)$user['business_id'];
-        $sql='SELECT s.id,s.status,s.voided_at,s.total_clp,s.payment_method,s.created_at,s.sold_by,s.warehouse_id,w.name AS warehouse_name,u.email AS seller_email,sp.point_name AS sales_point_name,sp.branch_name AS commercial_branch_name FROM sales s JOIN users u ON u.id=s.sold_by LEFT JOIN warehouses w ON w.id=s.warehouse_id AND w.business_id=s.business_id LEFT JOIN sale_point_snapshots sp ON sp.sale_id=s.id AND sp.business_id=s.business_id WHERE s.business_id=?';
+        $sql='SELECT s.id,s.status,s.voided_at,s.total_clp,s.payment_method,s.created_at,s.sold_by,s.warehouse_id,w.name AS warehouse_name,u.email AS seller_email,sp.point_name AS sales_point_name,sp.branch_name AS commercial_branch_name,s.client_id,s.client_name_snapshot AS client_name,s.client_rut_snapshot AS client_rut,s.customer_mode FROM sales s JOIN users u ON u.id=s.sold_by LEFT JOIN warehouses w ON w.id=s.warehouse_id AND w.business_id=s.business_id LEFT JOIN sale_point_snapshots sp ON sp.sale_id=s.id AND sp.business_id=s.business_id WHERE s.business_id=?';
         $params=[$biz];
         if(($user['role']??'')!=='admin'){$sql.=' AND s.sold_by=?';$params[]=(int)$user['id'];}
         $st=db()->prepare($sql.' ORDER BY s.id DESC LIMIT 100');
@@ -227,30 +227,37 @@ $app->group('', static function(RouteCollectorProxy $group): void {
         $hasSerial=false;foreach($wanted as $spec)if(array_key_exists('serial_numbers',$spec))$hasSerial=true;
         $reservationId=array_key_exists('reservation_id',$b)?reservationId($b['reservation_id']):null;
         if($reservationId!==null&&!$hasSerial)fail('La reserva requiere series para despachar.',422);
-        $clientId=null;$serialHash=null;
+        $clientId=originId($b['client_id']??null,'client_id');$serialHash=null;
+        $legacyClient=originId($b['serial_client_id']??null,'serial_client_id');
+        if($clientId!==null&&$legacyClient!==null&&$clientId!==$legacyClient)fail('Los clientes indicados no coinciden.',422);
+        $clientId=$clientId??$legacyClient;
+        $mode=$b['customer_mode']??($clientId===null?'consumer_final':'registered');
+        if(!in_array($mode,['registered','consumer_final'],true)||($mode==='registered')!==($clientId!==null))fail('Identificación de cliente inválida.',422);
         if($hasSerial){
-            $clientId=originId($b['serial_client_id']??null,'serial_client_id');
             if($clientId===null)throw new HttpError('Selecciona el cliente para la venta de equipos.',422,'serial_client_id');
             if(isset($b['discount_approval_token'])||isset($b['discount_request_id']))fail('La autorización de descuentos en ventas por serie queda pendiente de integración.',422);
             $canonical=[$uid,$payment,$b['warehouse_id']??null,$clientId,$wanted];if($reservationId!==null)$canonical[]=$reservationId;
             $serialHash=hash('sha256',json_encode($canonical,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
         }elseif(array_key_exists('serial_client_id',$b))fail('Cliente serializado sin series.',422);
+        $directHash=hash('sha256',json_encode([$uid,$payment,$b['warehouse_id']??null,$mode,$clientId,$wanted,$reservationId],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
         $db=db();
         try{
             $db->beginTransaction();
             originLockCompany($db,$biz);
-            $old=$db->prepare('SELECT s.id,s.sold_by,s.total_clp,s.warehouse_id,ss.payload_hash FROM sales s LEFT JOIN serial_sale_snapshots ss ON ss.sale_id=s.id AND ss.business_id=s.business_id WHERE s.business_id=? AND s.request_id=? FOR UPDATE');$old->execute([$biz,$requestId]);$prior=$old->fetch();$old->closeCursor();
+            $old=$db->prepare('SELECT s.id,s.sold_by,s.total_clp,s.warehouse_id,s.direct_payload_hash,s.client_id,ss.payload_hash FROM sales s LEFT JOIN serial_sale_snapshots ss ON ss.sale_id=s.id AND ss.business_id=s.business_id WHERE s.business_id=? AND s.request_id=? FOR UPDATE');$old->execute([$biz,$requestId]);$prior=$old->fetch();$old->closeCursor();
             if($prior){
                 if((int)$prior['sold_by']!==$uid||($prior['payload_hash']!==null&&(!$hasSerial||!hash_equals((string)$prior['payload_hash'],$serialHash)))||($hasSerial&&$prior['payload_hash']===null))fail('Identificador de venta reutilizado con otros datos.',409);
+                if($prior['direct_payload_hash']!==null&&!hash_equals((string)$prior['direct_payload_hash'],$directHash))fail('Identificador de venta reutilizado con otros datos.',409);
+                if($prior['direct_payload_hash']===null&&!$hasSerial&&$clientId!==null)fail('No se puede reasignar el cliente de una venta ya registrada.',409);
                 $db->commit();return respond($response,['ok'=>true,'sale_id'=>(int)$prior['id'],'total_clp'=>(int)$prior['total_clp'],'warehouse_id'=>$prior['warehouse_id'],'already_recorded'=>true]);
             }
-            $clientName=null;
-            if($hasSerial){$c=$db->prepare('SELECT name FROM habitual_clients WHERE business_id=? AND id=? AND is_active=1 FOR UPDATE');$c->execute([$biz,$clientId]);$clientName=$c->fetchColumn();$c->closeCursor();if($clientName===false)throw new HttpError('Cliente activo no encontrado.',422,'serial_client_id');}
+            $clientName=null;$clientRut=null;
+            if($clientId!==null){$c=$db->prepare('SELECT name,rut FROM habitual_clients WHERE business_id=? AND id=? AND is_active=1 FOR UPDATE');$c->execute([$biz,$clientId]);$customer=$c->fetch();$c->closeCursor();if(!$customer)throw new HttpError('Cliente activo no encontrado.',422,'client_id');$clientName=$customer['name'];$clientRut=$customer['rut'];}
             $saleLocation=titoSaleLocation($db,$user,$b['warehouse_id']??null,true,$request);
             if($reservationId!==null)reservationLockForSale($db,$biz,$reservationId,$clientId,$saleLocation,$wanted);
             $cashSessionId=titoCashSessionForSale($db,$user,$saleLocation);
-            $st=$db->prepare('INSERT INTO sales(business_id,sold_by,request_id,payment_method,total_clp,warehouse_id,cash_session_id) VALUES (?,?,?,?,0,?,?)');
-            $st->execute([$biz,$uid,$requestId,$payment,$saleLocation,$cashSessionId]);
+            $st=$db->prepare('INSERT INTO sales(business_id,sold_by,request_id,payment_method,total_clp,warehouse_id,cash_session_id,client_id,client_name_snapshot,client_rut_snapshot,customer_mode,direct_payload_hash) VALUES (?,?,?,?,0,?,?,?,?,?,?,?)');
+            $st->execute([$biz,$uid,$requestId,$payment,$saleLocation,$cashSessionId,$clientId,$clientName,$clientRut,$mode,$directHash]);
             $saleId=(int)$db->lastInsertId();
             if($hasSerial){$s=$db->prepare('INSERT INTO serial_sale_snapshots(sale_id,business_id,client_id,client_name,payload_hash) VALUES(?,?,?,?,?)');$s->execute([$saleId,$biz,$clientId,$clientName,$serialHash]);}
             salesPointRecord($db,$user,$request,$saleId,$saleLocation);

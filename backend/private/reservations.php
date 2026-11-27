@@ -15,8 +15,9 @@ function serialRequireFree(PDO $db,int $biz,int $pid,int $wid,float $qty,?int $e
 }
 function reservationId(mixed $v): int {if(!is_int($v)||$v<1)fail('Reserva inválida.',422);return $v;}
 function reservationLockForSale(PDO $db,int $biz,int $rid,int $client,int $wid,array $wanted): void {
-    $s=$db->prepare('SELECT client_id,warehouse_id,status FROM serial_reservations WHERE business_id=? AND id=? FOR UPDATE');$s->execute([$biz,$rid]);$row=$s->fetch();$s->closeCursor();
+    $s=$db->prepare('SELECT client_id,warehouse_id,status,quote_id FROM serial_reservations WHERE business_id=? AND id=? FOR UPDATE');$s->execute([$biz,$rid]);$row=$s->fetch();$s->closeCursor();
     if(!$row||$row['status']!=='pending'||(int)$row['client_id']!==$client||(int)$row['warehouse_id']!==$wid)fail('Reserva no vigente o no corresponde a cliente y bodega.',409);
+    if($row['quote_id']!==null)fail('Despacha esta reserva desde la cotización #'.$row['quote_id'].' para conservar sus precios.',409);
     $s=$db->prepare('SELECT product_id,quantity FROM serial_reservation_items WHERE business_id=? AND reservation_id=? ORDER BY product_id FOR UPDATE');$s->execute([$biz,$rid]);$lines=$s->fetchAll();$s->closeCursor();
     if(count($lines)!==count($wanted))fail('Despacha exactamente los productos reservados.',422);
     foreach($lines as $l){$p=(int)$l['product_id'];$v=$wanted[$p]??null;if(!$v||!isset($v['serial_numbers'])||count($v['serial_numbers'])!==(int)$l['quantity']||(float)$v['quantity']!==(float)$l['quantity'])fail('Cantidad y series deben coincidir con la reserva.',422);}
@@ -28,7 +29,7 @@ function registerReservationRoutes(RouteCollectorProxy $group): void {
     $group->get('/sales/reservations',static function(Request $request,Response $response): Response {
         $u=$request->getAttribute('currentUser');$biz=(int)$u['business_id'];$q=$request->getQueryParams();$wid=filter_var($q['warehouse_id']??null,FILTER_VALIDATE_INT,['options'=>['min_range'=>1]]);
         if($wid===false)fail('Bodega inválida.',422);$db=db();$wid=titoSaleLocation($db,$u,$wid,true,$request);
-        $s=$db->prepare("SELECT r.id,r.client_id,r.client_name,r.warehouse_id,r.status,r.note,r.sale_id,r.created_at,r.closed_at,r.cancel_reason,(r.created_by=? OR ?=1) AS can_cancel FROM serial_reservations r WHERE r.business_id=? AND r.warehouse_id=? ORDER BY (r.status='pending') DESC,r.id DESC LIMIT 100");
+        $s=$db->prepare("SELECT r.id,r.quote_id,r.client_id,r.client_name,r.warehouse_id,r.status,r.note,r.sale_id,r.created_at,r.closed_at,r.cancel_reason,(r.created_by=? OR ?=1) AS can_cancel FROM serial_reservations r WHERE r.business_id=? AND r.warehouse_id=? ORDER BY (r.status='pending') DESC,r.id DESC LIMIT 100");
         $s->execute([(int)$u['id'],($u['role']??'')==='admin'?1:0,$biz,$wid]);$rows=$s->fetchAll();$s->closeCursor();
         $s=$db->prepare('SELECT i.product_id,i.quantity,p.name,p.sku FROM serial_reservation_items i JOIN products p ON p.id=i.product_id AND p.business_id=i.business_id WHERE i.business_id=? AND i.reservation_id=? ORDER BY i.product_id');
         foreach($rows as &$r){$s->execute([$biz,$r['id']]);$r['items']=$s->fetchAll();$s->closeCursor();}unset($r);
@@ -59,8 +60,9 @@ function registerReservationRoutes(RouteCollectorProxy $group): void {
     $group->post('/sales/reservations/{id:[0-9]+}/cancel',static function(Request $request,Response $response,array $args): Response {
         $u=$request->getAttribute('currentUser');$biz=(int)$u['business_id'];$uid=(int)$u['id'];$id=(int)$args['id'];$b=requestBody($request);$reason=requireString($b,'reason',250);if(mb_strlen($reason)<3)fail('Indica motivo.',422);
         $db=db();try{$db->beginTransaction();originLockCompany($db,$biz);
-            $s=$db->prepare('SELECT warehouse_id,created_by,status FROM serial_reservations WHERE business_id=? AND id=? FOR UPDATE');$s->execute([$biz,$id]);$r=$s->fetch();$s->closeCursor();
+            $s=$db->prepare('SELECT warehouse_id,created_by,status,quote_id FROM serial_reservations WHERE business_id=? AND id=? FOR UPDATE');$s->execute([$biz,$id]);$r=$s->fetch();$s->closeCursor();
             if(!$r)fail('Reserva no encontrada.',404);titoSaleLocation($db,$u,(int)$r['warehouse_id'],true,$request);
+            if($r['quote_id']!==null)fail('Cancela la reserva desde su cotización #'.$r['quote_id'].'.',409);
             if((int)$r['created_by']!==$uid&&($u['role']??'')!=='admin')fail('Solo autor o administrador puede cancelar.',403);
             if($r['status']==='cancelled'){$db->commit();return respond($response,['ok'=>true]);}if($r['status']!=='pending')fail('Reserva ya despachada.',409);
             $s=$db->prepare("UPDATE serial_reservations SET status='cancelled',closed_by=?,closed_at=UTC_TIMESTAMP(),cancel_reason=? WHERE business_id=? AND id=? AND status='pending'");$s->execute([$uid,$reason,$biz,$id]);$db->commit();return respond($response,['ok'=>true]);

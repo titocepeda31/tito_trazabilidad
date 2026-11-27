@@ -1,5 +1,5 @@
 import React,{useEffect,useRef,useState} from 'react';
-import {pesos,qtyFormat} from './api.js';
+import {pesos,qtyFormat,newId} from './api.js';
 
 const payments=[['efectivo','Efectivo'],['transferencia','Transferencia'],['tarjeta','Tarjeta'],['otro','Otro']];
 function SeriesPicker({item,warehouse,request,value,onChange,disabled}){
@@ -35,50 +35,57 @@ function SeriesPicker({item,warehouse,request,value,onChange,disabled}){
     </>}
   </section>;
 }
-export default function QuoteConversionPanel({data,request,notify,locations,initialLocation,onBack,onDone,onCheck}){
-  const [warehouse,setWarehouse]=useState(Number(initialLocation)||0),[payment,setPayment]=useState('efectivo'),[series,setSeries]=useState({});
+export default function QuoteConversionPanel({data,request,notify,locations,initialLocation,onBack,onDone,onCheck,mode='sale'}){
+  const isReserve=mode==='reserve',isDispatch=mode==='dispatch';
+  const [warehouse,setWarehouse]=useState(Number(isDispatch?data.reservation?.warehouse_id:initialLocation)||0),[payment,setPayment]=useState('efectivo'),[series,setSeries]=useState({});
   const [busy,setBusy]=useState(false),[error,setError]=useState(''),[uncertain,setUncertain]=useState(false),[confirmedSale,setConfirmedSale]=useState(null);
-  const saving=useRef(false);
+  const saving=useRef(false),reserveRequest=useRef(null);
+  const [note,setNote]=useState('');
   const serialLines=data.items.filter(i=>Number(i.serial_control)===1);
-  const complete=serialLines.every(i=>Number.isInteger(Number(i.quantity))&&Number(i.quantity)<=500&&Number(i.quantity)>0&&(series[i.product_id]||[]).length===Number(i.quantity));
+  const eligible=serialLines.length===data.items.length&&serialLines.length>0&&serialLines.every(i=>Number.isInteger(Number(i.quantity))&&Number(i.quantity)>0&&Number(i.quantity)<=500);
+  const complete=isReserve?eligible:serialLines.every(i=>Number.isInteger(Number(i.quantity))&&Number(i.quantity)<=500&&Number(i.quantity)>0&&(series[i.product_id]||[]).length===Number(i.quantity));
   function changeWarehouse(v){
     if(Object.values(series).some(a=>a.length)&&!window.confirm('Cambiar de bodega eliminará las series seleccionadas. ¿Continuar?'))return;
     setWarehouse(Number(v));setSeries({});setError('');
   }
   async function submit(){
     if(saving.current||!complete||!warehouse||confirmedSale||!data.quote.client_id)return;
-    if(!uncertain&&!window.confirm('¿Confirmar la venta completa de la cotización #'+data.quote.id+' por '+pesos(data.quote.total_clp)+'? Verifica que las series correspondan a los equipos que entregarás.'))return;
+    if(!uncertain&&!window.confirm(isReserve?'¿Reservar todas las unidades de la cotización #'+data.quote.id+'? No se cobrará ni descontará stock físico.':'¿Confirmar la venta completa de la cotización #'+data.quote.id+' por '+pesos(data.quote.total_clp)+'? Verifica que las series correspondan a los equipos que entregarás.'))return;
     saving.current=true;setBusy(true);setError('');
     try{
-      const body={warehouse_id:warehouse,payment_method:payment,serial_items:serialLines.map(i=>({product_id:Number(i.product_id),serial_numbers:series[i.product_id]||[]}))};
-      const result=await request('/quotes/'+data.quote.id+'/convert',{method:'POST',body});
-      if(!result.ok||!result.sale_id)throw new Error('Respuesta de venta no confirmada.');
-      setConfirmedSale(Number(result.sale_id));setUncertain(false);
-      notify(result.already_recorded?'Venta #'+result.sale_id+' ya registrada.':'Venta #'+result.sale_id+' registrada desde cotización.','success');
+      let body;
+      if(isReserve){reserveRequest.current??=newId();body={request_id:reserveRequest.current,revision:Number(data.quote.revision),warehouse_id:warehouse,note:note.trim()};}
+      else body={warehouse_id:warehouse,payment_method:payment,...(isDispatch?{reservation_id:Number(data.reservation.id)}:{}),serial_items:serialLines.map(i=>({product_id:Number(i.product_id),serial_numbers:series[i.product_id]||[]}))};
+      const result=await request('/quotes/'+data.quote.id+(isReserve?'/reserve':'/convert'),{method:'POST',body});
+      const id=isReserve?result.reservation_id:result.sale_id;
+      if(!result.ok||!id)throw new Error('Respuesta no confirmada.');
+      setConfirmedSale(Number(id));setUncertain(false);
+      notify((isReserve?'Reserva #':'Venta #')+id+(result.already_recorded?' ya registrada.':' registrada desde cotización.'),'success');
       await onDone();
     }catch(e){
       const unknown=!(e.status>=400&&e.status<500&&![408,429].includes(e.status));
+      if(!unknown)reserveRequest.current=null;
       setUncertain(unknown);setError(unknown?'Resultado incierto. Reintenta con la misma selección o consulta la cotización antes de continuar.':e.message);
     }finally{saving.current=false;setBusy(false);}
   }
   const locked=busy||uncertain||Boolean(confirmedSale);
   return <div className="quotes-page">
-    <div className="section-intro"><div><button type="button" className="text-button" disabled={busy||uncertain||Boolean(confirmedSale)} onClick={onBack}>← Volver a cotización</button><p className="eyebrow">VENTAS / COTIZACIONES</p><h2>Preparar venta #{data.quote.id}</h2><p className="muted">{data.quote.customer_name}{data.quote.customer_rut?' · '+data.quote.customer_rut:''}</p></div></div>
+    <div className="section-intro"><div><button type="button" className="text-button" disabled={busy||uncertain||Boolean(confirmedSale)} onClick={onBack}>← Volver a cotización</button><p className="eyebrow">VENTAS / COTIZACIONES</p><h2>{isReserve?'Preparar reserva':isDispatch?'Despachar reserva #'+data.reservation.id:'Preparar venta'} · Cotización #{data.quote.id}</h2><p className="muted">{data.quote.customer_name}{data.quote.customer_rut?' · '+data.quote.customer_rut:''}</p></div></div>
     <section className="panel pad formstack">
-      <h3>Condiciones de venta</h3>
-      <label>Bodega / sucursal de venta<select value={warehouse||''} disabled={locked} onChange={e=>changeWarehouse(e.target.value)}><option value="">Selecciona bodega</option>{locations.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label>
-      <label>Medio de pago<select value={payment} disabled={locked} onChange={e=>setPayment(e.target.value)}>{payments.map(([v,l])=><option value={v} key={v}>{l}</option>)}</select></label>
+      <h3>{isReserve?'Condiciones de reserva':'Condiciones de venta'}</h3>
+      <label>Bodega / sucursal de venta<select value={warehouse||''} disabled={locked||isDispatch} onChange={e=>changeWarehouse(e.target.value)}><option value="">Selecciona bodega</option>{isDispatch?<option value={warehouse}>{data.reservation.warehouse_name||'Bodega #'+warehouse}</option>:locations.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label>
+      {isReserve?<label>Observación (opcional)<input value={note} maxLength={250} disabled={locked} onChange={e=>setNote(e.target.value)}/></label>:<label>Medio de pago<select value={payment} disabled={locked} onChange={e=>setPayment(e.target.value)}>{payments.map(([v,l])=><option value={v} key={v}>{l}</option>)}</select></label>}
       <div className="table-wrap"><table><thead><tr><th>Producto</th><th>Cantidad</th><th>Precio pactado</th><th>Subtotal</th></tr></thead><tbody>{data.items.map(i=><tr key={i.id}><td>{i.product_name_snapshot}{Number(i.serial_control)===1&&<small className="sub">Requiere series</small>}</td><td>{qtyFormat(i.quantity)} {i.sale_unit}</td><td>{pesos(i.unit_price_clp)}</td><td>{pesos(i.subtotal_clp)}</td></tr>)}</tbody></table></div>
-      <div className="receipt-total"><span>Total acordado</span><strong>{pesos(data.quote.total_clp)}</strong></div><p className="helper">Precios y cantidades de la cotización no editables. La venta completa requiere caja habilitada.</p>
+      <div className="receipt-total"><span>Total acordado</span><strong>{pesos(data.quote.total_clp)}</strong></div><p className="helper">Precios y cantidades de la cotización no editables. {isReserve?'Se compromete stock libre por cantidad, sin cobro ni salida física.':'La venta completa requiere caja habilitada.'}</p>
     </section>
-    {warehouse>0&&serialLines.map(i=><SeriesPicker key={warehouse+'-'+i.product_id} item={i} warehouse={warehouse} request={request} value={series[i.product_id]||[]} onChange={v=>setSeries(old=>({...old,[i.product_id]:v}))} disabled={locked}/>)}
+    {!isReserve&&warehouse>0&&serialLines.map(i=><SeriesPicker key={warehouse+'-'+i.product_id} item={i} warehouse={warehouse} request={request} value={series[i.product_id]||[]} onChange={v=>setSeries(old=>({...old,[i.product_id]:v}))} disabled={locked}/>)}
     <section className="panel pad formstack">
       {error&&<p role="alert" className="warning-box">{error}</p>}
-      {confirmedSale?<><strong>Venta #{confirmedSale} registrada.</strong><button type="button" className="primary" disabled={busy} onClick={onCheck}>Consultar cotización</button></>:<>
-      {!complete&&<p className="helper">Selecciona exactamente todas las series requeridas.</p>}
-      <button type="button" className="primary wide" disabled={busy||!complete||!warehouse||!data.quote.client_id} onClick={submit}>{busy?'Confirmando…':uncertain?'Reintentar la misma conversión':'Confirmar venta y descontar stock'}</button>
+      {confirmedSale?<><strong>{isReserve?'Reserva':'Venta'} #{confirmedSale} registrada.</strong><button type="button" className="primary" disabled={busy} onClick={onCheck}>Consultar cotización</button></>:<>
+      {!complete&&<p className="helper">{isReserve?'Solo cotizaciones íntegramente serializadas de hasta 500 unidades por línea.':'Selecciona exactamente todas las series requeridas.'}</p>}
+      <button type="button" className="primary wide" disabled={busy||!complete||!warehouse||!data.quote.client_id} onClick={submit}>{busy?'Confirmando…':uncertain?'Reintentar la misma operación':isReserve?'Confirmar reserva':'Confirmar venta y descontar stock'}</button>
       {(uncertain||error)&&<button type="button" className="ghost" disabled={busy} onClick={onCheck}>Consultar estado de cotización</button>}
-      <p className="helper">La confirmación registra venta y caja, series y movimientos en una sola transacción. No emite DTE.</p></>}
+      <p className="helper">{isReserve?'La reserva conserva los precios acordados hasta despacho o cancelación. No genera venta, cobro ni DTE.':'La confirmación registra venta y caja, series y movimientos en una sola transacción. No emite DTE.'}</p></>}
     </section>
   </div>;
 }

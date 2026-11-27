@@ -6,9 +6,9 @@ import QuoteConversionPanel from './QuoteConversionPanel.jsx';
 
 const defaultDate=()=>{const d=new Date();d.setDate(d.getDate()+7);return d.toLocaleDateString('sv-SE',{timeZone:'America/Santiago'});};
 const storage='tito_pending_quote';
-const statusNames={draft:'Borrador',sent:'Enviada',accepted:'Aceptada',rejected:'Rechazada',expired:'Vencida',converted:'Convertida'};
+const statusNames={draft:'Borrador',sent:'Enviada',accepted:'Aceptada',rejected:'Rechazada',expired:'Vencida',reserved:'Reservada',converted:'Convertida'};
 const statusOf=q=>q.effective_status||q.status;
-const eventNames={created:'Creada',edited:'Borrador editado',sent:'Envío registrado',accepted:'Aceptación registrada',rejected:'Rechazo registrado',converted:'Convertida en venta'};
+const eventNames={created:'Creada',edited:'Borrador editado',sent:'Envío registrado',accepted:'Aceptación registrada',rejected:'Rechazo registrado',converted:'Convertida en venta',reserved:'Reserva registrada',reservation_cancelled:'Reserva cancelada'};
 export default function QuotesPanel({products,request,notify,onSale,businessName}){
   const [quotes,setQuotes]=useState([]);
   const [customer,setCustomer]=useState(null);
@@ -17,6 +17,7 @@ export default function QuotesPanel({products,request,notify,onSale,businessName
   const [statusFilter,setStatusFilter]=useState('all');
   const [editing,setEditing]=useState(null);
   const [statusNote,setStatusNote]=useState('');
+  const [cancelReason,setCancelReason]=useState('');
   const [contact,setContact]=useState('');
   const [valid,setValid]=useState(defaultDate);
   const [notes,setNotes]=useState('');
@@ -71,7 +72,7 @@ export default function QuotesPanel({products,request,notify,onSale,businessName
   async function view(id){
     setBusy(true);try{
       const data=await request('/quotes/'+id);
-      setSelected(data);setStatusNote('');setScreen('detail');
+      setSelected(data);setStatusNote('');setCancelReason('');setScreen('detail');
       const contact=String(data.quote.customer_email||data.quote.customer_contact||'').trim();
       setRecipientEmail(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact)?contact:'');
     }catch(e){notify(e.message,'error');}finally{setBusy(false);}
@@ -115,6 +116,14 @@ export default function QuotesPanel({products,request,notify,onSale,businessName
     }catch(e){notify('No se pudo confirmar el cambio: '+e.message+'. Se recargará el estado actual.','error');await refresh();await view(id);}
     finally{setBusy(false);}
   }
+  async function cancelReservation(){
+    if(busy||selected?.reservation?.status!=='pending'||cancelReason.trim().length<3)return;
+    if(!window.confirm('¿Cancelar reserva #'+selected.reservation.id+' y liberar las cantidades comprometidas?'))return;
+    const id=selected.quote.id;setBusy(true);
+    try{await request('/quotes/'+id+'/cancel-reservation',{method:'POST',body:{request_id:newId(),revision:Number(selected.quote.revision),reservation_id:Number(selected.reservation.id),reason:cancelReason.trim()}});notify('Reserva cancelada; stock comprometido liberado.','success');await conversionDone(id);}
+    catch(e){notify('No se pudo confirmar: '+e.message,'error');await refresh();await view(id);}
+    finally{setBusy(false);}
+  }
   function backFromNew(){
     if(locked)return;
     if((customer||items.length||contact||notes)&&!window.confirm('¿Salir sin guardar esta cotización?'))return;
@@ -122,7 +131,8 @@ export default function QuotesPanel({products,request,notify,onSale,businessName
   }
   const shown=quotes.filter(q=>(statusFilter==='all'||statusOf(q)===statusFilter)&&[q.id,q.customer_name,q.customer_rut,statusNames[statusOf(q)]].some(v=>String(v??'').toLocaleLowerCase('es-CL').includes(quoteQuery.trim().toLocaleLowerCase('es-CL'))));
   const hasSerial=Boolean(selected?.items.some(i=>Number(i.serial_control)===1));
-  if(screen==='convert'&&selected)return <QuoteConversionPanel key={selected.quote.id} data={selected} request={request} notify={notify} locations={saleLocations} initialLocation={saleLocationId} onBack={()=>setScreen('detail')} onDone={()=>conversionDone(selected.quote.id)} onCheck={()=>view(selected.quote.id)}/>;
+  const canReserve=Boolean(selected?.items.length&&selected.items.every(i=>Number(i.serial_control)===1&&i.sale_unit==='unidad'&&Number.isInteger(Number(i.quantity))&&Number(i.quantity)>0&&Number(i.quantity)<=500));
+  if(['convert','reserve','dispatch'].includes(screen)&&selected)return <QuoteConversionPanel key={screen+'-'+selected.quote.id} mode={screen==='reserve'?'reserve':screen==='dispatch'?'dispatch':'sale'} data={selected} request={request} notify={notify} locations={saleLocations} initialLocation={saleLocationId} onBack={()=>setScreen('detail')} onDone={()=>conversionDone(selected.quote.id)} onCheck={()=>view(selected.quote.id)}/>;
   return <div className="quotes-page">
     {screen==='list'&&<div className="section-intro"><div><p className="eyebrow">VENTAS</p><h2>Cotizaciones</h2><p className="muted">Presupuesta sin descontar ni reservar existencias.</p></div><button type="button" className="primary" disabled={busy} onClick={openNew}>+ Nueva cotización</button></div>}
     {screen==='new'&&<><div className="section-intro"><div><button type="button" className="text-button" disabled={locked} onClick={backFromNew}>← Volver a cotizaciones</button><h2>{editing?'Editar borrador #'+editing.id:'Nueva cotización'}</h2><p className="muted">Selecciona un cliente y los productos a cotizar.</p></div></div><section className="panel pad quote-form">
@@ -162,7 +172,7 @@ export default function QuotesPanel({products,request,notify,onSale,businessName
         {statusOf(selected.quote)==='expired'&&<p className="warning-box">Cotización vencida. No se puede convertir; crea una nueva.</p>}
         <h3>Historial de cambios</h3>
         {!(selected.events||[]).length&&<p className="helper">Sin eventos registrados desde la incorporación del historial.</p>}
-        {(selected.events||[]).map(e=><details key={e.id}><summary><strong>{eventNames[e.event_type]||e.event_type}</strong> · {String(e.created_at).slice(0,16)}</summary><p>{e.actor_email} {e.note?'· '+e.note:''}</p>{e.event_type==='converted'&&e.details&&<><p>Venta #{e.details.sale_id} · {pesos(e.details.total_clp)}</p>{Object.entries(e.details.serial_items||{}).map(([pid,numbers])=><p key={pid}>{selected.items.find(i=>String(i.product_id)===pid)?.product_name_snapshot||'Producto #'+pid}: {numbers.join(', ')}</p>)}</>}{e.event_type==='edited'&&e.details&&<><p>Total anterior: {pesos(e.details.before?.total_clp)} → {pesos(e.details.after?.total_clp)}</p><p>Productos antes: {(e.details.items_before||[]).map(i=>i.product_name_snapshot+' × '+qtyFormat(i.quantity)+' · '+pesos(i.unit_price_clp)).join('; ')}</p><p>Productos después: {(e.details.items_after||[]).map(i=>i.product_name_snapshot+' × '+qtyFormat(i.quantity)+' · '+pesos(i.unit_price_clp)).join('; ')}</p></>}</details>)}
+        {(selected.events||[]).map(e=><details key={e.id}><summary><strong>{eventNames[e.event_type]||e.event_type}</strong> · {String(e.created_at).slice(0,16)}</summary><p>{e.actor_email} {e.note?'· '+e.note:''}</p>{['reserved','reservation_cancelled'].includes(e.event_type)&&e.details&&<p>Reserva #{e.details.reservation_id}</p>}{e.event_type==='converted'&&e.details&&<><p>{e.details.reservation_id?'Reserva #'+e.details.reservation_id+' → ':''}Venta #{e.details.sale_id} · {pesos(e.details.total_clp)}</p>{Object.entries(e.details.serial_items||{}).map(([pid,numbers])=><p key={pid}>{selected.items.find(i=>String(i.product_id)===pid)?.product_name_snapshot||'Producto #'+pid}: {numbers.join(', ')}</p>)}</>}{e.event_type==='edited'&&e.details&&<><p>Total anterior: {pesos(e.details.before?.total_clp)} → {pesos(e.details.after?.total_clp)}</p><p>Productos antes: {(e.details.items_before||[]).map(i=>i.product_name_snapshot+' × '+qtyFormat(i.quantity)+' · '+pesos(i.unit_price_clp)).join('; ')}</p><p>Productos después: {(e.details.items_after||[]).map(i=>i.product_name_snapshot+' × '+qtyFormat(i.quantity)+' · '+pesos(i.unit_price_clp)).join('; ')}</p></>}</details>)}
       </section>
       <div className="quote-share-tools">
         <label>Correo del cliente (opcional)<input type="email" placeholder="cliente@empresa.cl" value={recipientEmail} onChange={e=>setRecipientEmail(e.target.value)}/></label>
@@ -171,6 +181,8 @@ export default function QuotesPanel({products,request,notify,onSale,businessName
         <button type="button" className="ghost" onClick={()=>window.print()}>Imprimir / guardar PDF</button>
         <p className="helper">Compartir PDF abre el menú del teléfono: selecciona Gmail u otra app y confirma el envío. «Preparar correo» incluye el detalle como texto, sin adjuntar PDF automáticamente.</p>
       </div>
-      {statusOf(selected.quote)==='accepted'&&<section className="panel pad formstack"><h3>Convertir en venta</h3><p>{hasSerial?'Identifica las series de cada equipo que entregarás.':'Verifica bodega, pago y disponibilidad.'} Los precios y cantidades se conservan según la cotización.</p><button type="button" className="primary" disabled={busy||!saleLocationId||!selected.quote.client_id} onClick={()=>setScreen('convert')}>Preparar venta</button>{!saleLocationId&&<p className="helper">No se pudo determinar una ubicación de venta.</p>}</section>}</div></section>}
+      {statusOf(selected.quote)==='accepted'&&<section className="panel pad formstack"><h3>Convertir en venta</h3><p>{hasSerial?'Identifica las series de cada equipo que entregarás.':'Verifica bodega, pago y disponibilidad.'} Los precios y cantidades se conservan según la cotización.</p><button type="button" className="primary" disabled={busy||!saleLocationId||!selected.quote.client_id} onClick={()=>setScreen('convert')}>Preparar venta</button>{canReserve?<button type="button" className="ghost" disabled={busy||!saleLocationId||!selected.quote.client_id} onClick={()=>setScreen('reserve')}>Reservar para entrega posterior</button>:<p className="helper">La reserva desde cotización actualmente admite solo equipos serializados; las cotizaciones normales y mixtas pueden convertirse en venta directa.</p>}{!saleLocationId&&<p className="helper">No se pudo determinar una ubicación de venta.</p>}</section>}
+      {selected.reservation&&<section className="panel pad formstack"><h3>Reserva #{selected.reservation.id}</h3><p>{selected.reservation.warehouse_name} · {({pending:'Pendiente de despacho',cancelled:'Cancelada',dispatched:'Despachada'})[selected.reservation.status]||selected.reservation.status}</p>{selected.reservation.note&&<p>{selected.reservation.note}</p>}{selected.reservation.cancel_reason&&<p>Motivo de cancelación: {selected.reservation.cancel_reason}</p>}{selected.reservation.sale_id&&<p>Venta #{selected.reservation.sale_id}</p>}
+      {statusOf(selected.quote)==='reserved'&&selected.reservation.status==='pending'&&<><p className="helper">El precio acordado se conserva hasta despacho o cancelación. No se ha cobrado ni descontado stock físico.</p><button type="button" className="primary" disabled={busy} onClick={()=>setScreen('dispatch')}>Preparar despacho y venta</button><label>Motivo de cancelación<input maxLength={250} value={cancelReason} disabled={busy} onChange={e=>setCancelReason(e.target.value)}/></label><button type="button" className="ghost" disabled={busy||cancelReason.trim().length<3} onClick={cancelReservation}>Cancelar reserva</button></>}</section>}</div></section>}
   </div>;
 }

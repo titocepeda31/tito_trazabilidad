@@ -65,7 +65,65 @@ function titoCreditAccountListSql(): string {
     LEFT JOIN (SELECT account_id,SUM(amount_clp) AS adjusted_clp FROM credit_adjustments GROUP BY account_id) adj ON adj.account_id=a.id
     LEFT JOIN (SELECT account_id,SUM(amount_clp) AS refunded_clp FROM credit_refunds GROUP BY account_id) ref ON ref.account_id=a.id";
 }
+/** RUT chileno canónico (sin puntos, con guion y dígito verificador). */
+function titoCommercialRut(mixed $value): ?string {
+    if($value===null||$value==='')return null;
+    if(!is_string($value)||mb_strlen($value)>25)fail('RUT inválido.',422);
+    $clean=strtoupper(preg_replace('/[.\s-]+/u','',trim($value))??'');
+    if(!preg_match('/^[0-9]{1,8}[0-9K]$/D',$clean))fail('RUT inválido.',422);
+    $body=ltrim(substr($clean,0,-1),'0');$dv=substr($clean,-1);
+    if($body==='')fail('RUT inválido.',422);
+    $sum=0;$factor=2;
+    for($i=strlen($body)-1;$i>=0;$i--){$sum+=(int)$body[$i]*$factor;$factor=$factor===7?2:$factor+1;}
+    $n=11-($sum%11);$expected=$n===11?'0':($n===10?'K':(string)$n);
+    if($dv!==$expected)fail('El dígito verificador del RUT no coincide.',422);
+    return $body.'-'.$dv;
+}
+function titoCommercialFields(array $b): array {
+    if(array_diff(array_keys($b),['name','phone','notes','client_type','rut','business_activity','address','commune','contact_name','billing_email','is_active']))fail('Campos comerciales no permitidos.',422);
+    $type=$b['client_type']??null;if($type==='')$type=null;
+    if($type!==null&&!in_array($type,['person','business'],true))fail('Tipo de cliente inválido.',422);
+    $email=titoCreditString($b,'billing_email',254);
+    if($email!==null&&!filter_var($email,FILTER_VALIDATE_EMAIL))fail('Correo de facturación inválido.',422);
+    $active=$b['is_active']??true;if(!is_bool($active))fail('Estado de cliente inválido.',422);
+    return [titoCreditString($b,'name',150,true),titoCreditString($b,'phone',80),titoCreditString($b,'notes',300),$type,titoCommercialRut($b['rut']??null),titoCreditString($b,'business_activity',150),titoCreditString($b,'address',200),titoCreditString($b,'commune',100),titoCreditString($b,'contact_name',150),$email,$active?1:0];
+}
 function registerHabitualCreditRoutes(RouteCollectorProxy $group): void {
+    // Registro comercial separado de crédito, con la misma identidad de cliente.
+    $group->get('/clients/commercial',static function(Request $request,Response $response): Response {
+        $admin=adminOnly($request);$biz=(int)$admin['business_id'];$query=$request->getQueryParams();
+        $q=$query['q']??'';$state=$query['state']??'all';$page=filter_var($query['page']??1,FILTER_VALIDATE_INT,['options'=>['min_range'=>1,'max_range'=>100000]]);
+        if(!is_string($q)||mb_strlen($q)>150||!in_array($state,['all','active','inactive'],true)||$page===false)fail('Filtro inválido.',422);
+        $q=trim($q);$rutSearch=strtoupper(preg_replace('/[.\s-]+/u','',$q)??'');
+        $where=' WHERE business_id=?';$params=[$biz];
+        if($state!=='all'){$where.=' AND is_active=?';$params[]=$state==='active'?1:0;}
+        if($q!==''){
+            $where.=" AND (LOCATE(?,name)>0 OR LOCATE(?,COALESCE(contact_name,''))>0 OR LOCATE(?,COALESCE(phone,''))>0 OR LOCATE(?,COALESCE(billing_email,''))>0 OR (?<>'' AND LOCATE(?,REPLACE(COALESCE(rut,''),'-',''))>0))";
+            array_push($params,$q,$q,$q,$q,$rutSearch,$rutSearch);
+        }
+        $db=db();$st=$db->prepare('SELECT COUNT(*) FROM habitual_clients'.$where);$st->execute($params);$total=(int)$st->fetchColumn();$st->closeCursor();
+        $page=min($page,max(1,(int)ceil($total/25)));$offset=($page-1)*25;
+        $st=$db->prepare('SELECT id,name,phone,notes,client_type,rut,business_activity,address,commune,contact_name,billing_email,is_active,created_at FROM habitual_clients'.$where.' ORDER BY name,id LIMIT 25 OFFSET '.$offset);
+        $st->execute($params);return respond($response,['clients'=>$st->fetchAll(),'total'=>$total,'page'=>$page,'pages'=>max(1,(int)ceil($total/25))]);
+    });
+    $group->post('/clients/commercial',static function(Request $request,Response $response): Response {
+        $admin=adminOnly($request);$fields=titoCommercialFields(requestBody($request));$db=db();
+        try{
+            $st=$db->prepare('INSERT INTO habitual_clients(business_id,name,phone,notes,client_type,rut,business_activity,address,commune,contact_name,billing_email,is_active) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)');
+            $st->execute([(int)$admin['business_id'],...$fields]);
+            return respond($response,['ok'=>true,'client_id'=>(int)$db->lastInsertId()],201);
+        }catch(PDOException $e){if((int)($e->errorInfo[1]??0)===1062)fail('Ya existe un cliente con ese RUT en la empresa.',409);throw $e;}
+    });
+    $group->post('/clients/commercial/{id:[0-9]+}/update',static function(Request $request,Response $response,array $args): Response {
+        $admin=adminOnly($request);$biz=(int)$admin['business_id'];$id=(int)$args['id'];$fields=titoCommercialFields(requestBody($request));$db=db();
+        try{
+            $st=$db->prepare('UPDATE habitual_clients SET name=?,phone=?,notes=?,client_type=?,rut=?,business_activity=?,address=?,commune=?,contact_name=?,billing_email=?,is_active=? WHERE id=? AND business_id=?');
+            $st->execute([...$fields,$id,$biz]);
+            $check=$db->prepare('SELECT id FROM habitual_clients WHERE id=? AND business_id=?');$check->execute([$id,$biz]);if(!$check->fetchColumn())fail('Cliente no encontrado.',404);
+            return respond($response,['ok'=>true,'client_id'=>$id]);
+        }catch(PDOException $e){if((int)($e->errorInfo[1]??0)===1062)fail('Ya existe otro cliente con ese RUT en la empresa.',409);throw $e;}
+    });
+
     $group->get('/clients',static function(Request $request,Response $response): Response {
         $admin=titoStaffRequire($request,'can_sell_credit');$biz=(int)$admin['business_id'];
         $st=db()->prepare('SELECT id,name,phone,notes,credit_enabled,credit_limit_clp,is_active,created_at FROM habitual_clients WHERE business_id=? ORDER BY name,id LIMIT 500');

@@ -1,6 +1,7 @@
 import React,{useEffect,useMemo,useState} from 'react';
 import {newId,pesos} from './api.js';
 import CreditOperationsPanel from './CreditOperationsPanel.jsx';
+import CommercialClientsPanel from './CommercialClientsPanel.jsx';
 
 const pendingKey='tito_pending_credit_payment';
 const methodNames={efectivo:'Efectivo',transferencia:'Transferencia',tarjeta:'Tarjeta',otro:'Otro'};
@@ -10,7 +11,14 @@ const dateChile=s=>{
   const d=new Date(String(s).replace(' ','T')+'Z');
   return Number.isFinite(d.valueOf())?d.toLocaleDateString('es-CL',{timeZone:'America/Santiago'}):String(s);
 };
-export default function ClientsPanel({request,notify,onChange}){
+export default function ClientsPanel(props){
+  const [tab,setTab]=useState('commercial');
+  return <><div className="role-nav" aria-label="Gestión de clientes">
+    <button type="button" className={tab==='commercial'?'primary':'ghost'} onClick={()=>setTab('commercial')}>Clientes</button>
+    <button type="button" className={tab==='credit'?'primary':'ghost'} onClick={()=>setTab('credit')}>Crédito heredado</button>
+  </div>{tab==='commercial'?<CommercialClientsPanel {...props}/>:<LegacyCreditPanel {...props}/>}</>;
+}
+function LegacyCreditPanel({request,notify,onChange}){
   const [clients,setClients]=useState([]);
   const [accounts,setAccounts]=useState([]);
   const [loading,setLoading]=useState(true);
@@ -97,9 +105,9 @@ export default function ClientsPanel({request,notify,onChange}){
   }
   return <div className="clients-page">
     <div className="section-intro">
-      <div><p className="eyebrow">CLIENTES HABITUALES</p><h2>Clientes y cuentas por cobrar</h2>
+      <div><p className="eyebrow">CRÉDITO HEREDADO</p><h2>Cuentas por cobrar</h2>
         <p className="muted">Autoriza crédito para clientes de confianza y registra los abonos cuando recibas el dinero.</p></div>
-      <button className="primary" onClick={startCreate} disabled={locked}>+ Nuevo cliente</button>
+      <p className="helper">Los nuevos clientes se registran en la pestaña Clientes.</p>
     </div>
     <div className="stats-grid">
       <div className="stat-card"><div className="stat-head"><span>Por cobrar (cuentas listadas)</span><span className="stat-icon">⌁</span></div><strong>{pesos(outstanding)}</strong><small>Deudas pendientes después de devoluciones.</small></div>

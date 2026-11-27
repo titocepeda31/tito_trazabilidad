@@ -51,7 +51,7 @@ const menu = [
   { key: 'vender', label: 'Vender', ico: '▣' },
   { key: 'ventas', label: 'Ventas', ico: '◷' },
   { key: 'devoluciones', label: 'Devoluciones', ico: '↩' },
-  { key: 'clientes', label: 'Clientes y crédito', ico: '♧' },
+  { key: 'clientes', label: 'Clientes', ico: '♧' },
   { key: 'cotizaciones', label: 'Cotizar', ico: '▤' },
   { key: 'aprobaciones', label: 'Autorizaciones', ico: '✓' },
   { key: 'organizacion', label: 'Empresas y sucursales', ico: '▦' },
@@ -728,7 +728,7 @@ function SellPanel({ products, request, refresh, notify, canDiscount, canApprove
         sessionStorage.removeItem('tito_pending_credit_sale');setCreditPending(null);
         notify('Venta a crédito rechazada: '+err.message,'error');
       }else{
-        notify('Resultado incierto al registrar la venta a crédito: '+err.message+'. Comprueba Clientes y crédito y reintenta EL MISMO registro; no generes otra venta.','error');
+        notify('Resultado incierto al registrar la venta a crédito: '+err.message+'. Comprueba Clientes → Crédito heredado y reintenta EL MISMO registro; no generes otra venta.','error');
       }
     }finally{setBusy(false);}
   }
@@ -1012,7 +1012,7 @@ function SalesPanel({sales,onRefresh,request,notify,canVoid,onStartReturn,busine
         <button type="button" className="primary" disabled={busy} onClick={printExistingSale}>Imprimir voucher · 80 mm</button>
         <p className="helper">Se abrirá un PDF con el detalle de esta venta; podrás imprimirlo o guardarlo desde el navegador.</p>
       </div>
-      {canVoid&&detail.sale.status!=='voided'&&creditSales[detail.sale.id]&&<p className="warning-box">Esta venta es a crédito. Para registrar una devolución, una anulación completa o un reembolso, usa Más → Clientes y crédito → Cuentas por cobrar → Ver / gestionar. Allí se ajustan conjuntamente deuda e inventario.</p>}
+      {canVoid&&detail.sale.status!=='voided'&&creditSales[detail.sale.id]&&<p className="warning-box">Esta venta es a crédito. Para registrar una devolución, una anulación completa o un reembolso, usa Más → Clientes → Crédito heredado → Cuentas por cobrar → Ver / gestionar. Allí se ajustan conjuntamente deuda e inventario.</p>}
       {detail.sale.serial_client_name&&<p><strong>Cliente:</strong> {detail.sale.serial_client_name}.</p>}
       {canVoid&&detail.sale.status!=='voided'&&!creditSales[detail.sale.id]&&<div className="sale-return-actions"><button className="primary wide" type="button" disabled={busy} onClick={()=>{setDetail(null);onStartReturn(detail.sale.id);}}>↩ Registrar devolución de productos</button>
         {returnCount===0?<button className="ghost wide danger-button" disabled={busy} onClick={()=>setVoidTarget(detail.sale)}>Anular esta venta y reponer todo el stock</button>:<p className="helper">{returnCount>0?'Esta venta ya tiene devoluciones: no corresponde una anulación total.': 'La anulación total requiere verificar el historial de devoluciones en la API.'}</p>}

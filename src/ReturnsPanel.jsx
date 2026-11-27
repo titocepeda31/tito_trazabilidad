@@ -4,6 +4,7 @@ import {inChilePeriod,pageSlice} from './historyFilters.js';
 
 const pendingKey='tito_pending_customer_return';
 const kindLabels={commercial:'Devolución comercial',warranty:'Garantía por falla de origen'};
+const assessmentLabels={pending_review:'Pendiente de evaluación',rejected:'Rechazado con justificación',technical_service:'Derivado a servicio técnico'};
 const resolutionLabels={refund:'Reembolso',exchange:'Cambio de producto',repair:'Reparación'};
 const dateChile=value=>{
   if(!value)return '—';
@@ -27,6 +28,8 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
   const [query,setQuery]=useState(''),[searchResults,setSearchResults]=useState(null),[searchBusy,setSearchBusy]=useState(false),[searchError,setSearchError]=useState('');
   const autoPick=useRef(null),loadVersion=useRef(0);
   const [history,setHistory]=useState([]);
+  const [assessments,setAssessments]=useState([]),[assessmentError,setAssessmentError]=useState('');
+  const [outcome,setOutcome]=useState('pending_review'),[custody,setCustody]=useState('customer'),[evidence,setEvidence]=useState('');
   const [creditHistory,setCreditHistory]=useState([]);
   const [historyQuery,setHistoryQuery]=useState('');
   const [historyPeriod,setHistoryPeriod]=useState('all');
@@ -71,6 +74,10 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
   const age=saleAge(detail?.sale_created_at);
   const remaining=items.some(i=>Number(i.quantity)>Number(i.returned_qty)+0.000001);
 
+  async function loadAssessments(){
+    try{const data=await request('/returns/assessments');setAssessments(data.assessments||[]);setAssessmentError('');}
+    catch(e){setAssessmentError('No se pudo cargar el historial de evaluaciones. Comprueba el despliegue y la migración 014. '+e.message);}
+  }
   async function loadHistory(){
     try{
       const response=await request('/returns');
@@ -108,7 +115,7 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
       else notify('No se pudo revisar la venta: '+e.message,'error');
     }finally{if(version===loadVersion.current)setLoading(false);}
   }
-  useEffect(()=>{void loadHistory();},[]);
+  useEffect(()=>{void loadHistory();void loadAssessments();},[]);
   useEffect(()=>{
     if(initialSaleId){setView('new');setSaleId(String(initialSaleId));}
   },[initialSaleId]);
@@ -124,12 +131,13 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
   function chooseSale(id,pick=null){
     if(locked)return;
     const next=String(id||'');
-    ++loadVersion.current;setDetail(null);setQuantities({});setChosenSeries({});setReason('');setInspectionConfirmed(false);setReturnKind('commercial');setResolution('refund');
+    ++loadVersion.current;setDetail(null);setQuantities({});setChosenSeries({});setReason('');setInspectionConfirmed(false);setReturnKind('commercial');setResolution('refund');setOutcome('pending_review');setCustody('customer');setEvidence('');
     autoPick.current=pick;setView('new');setSearchResults(null);
     if(next===saleId)void loadSale(next);else setSaleId(next);
   }
 
   async function saveReturn(body){
+    if(body.assessment)return saveAssessment(body);
     setBusy(true);
     try{
       const result=await request('/sales/'+body.sale_id+'/returns',{
@@ -148,9 +156,22 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
       if(e.status>=400&&e.status<500&&![408,429].includes(e.status)){sessionStorage.removeItem(pendingKey);setPending(null);notify('Devolución rechazada: '+e.message,'error');await loadSale(body.sale_id);}else notify('No se pudo confirmar la devolución: '+e.message+'. Revisa el historial y reintenta con el mismo identificador; no generes otra devolución.', 'error');
     }finally{setBusy(false);}
   }
+  async function saveAssessment(body){
+    setBusy(true);
+    try{
+      const {assessment,sale_id,...payload}=body;
+      const result=await request('/sales/'+sale_id+'/return-assessments',{method:'POST',body:payload});
+      sessionStorage.removeItem(pendingKey);setPending(null);setReason('');setEvidence('');setInspectionConfirmed(false);setQuantities({});setChosenSeries({});
+      notify('Evaluación #'+result.assessment_id+' registrada. No se modificó stock ni dinero.','success');
+      await loadAssessments();setView('assessments');
+    }catch(e){
+      if(e.status>=400&&e.status<500&&![408,429].includes(e.status)){sessionStorage.removeItem(pendingKey);setPending(null);notify('No se registró la evaluación: '+e.message,'error');}
+      else notify('Resultado no confirmado. Reintenta el mismo registro, sin crear otro. '+e.message,'error');
+    }finally{setBusy(false);}
+  }
   function submit(e){
     e.preventDefault();
-    if(locked||!detail||String(detail.sale_id)!==String(saleId)||denied)return;
+    if(locked||!detail||String(detail.sale_id)!==String(saleId))return;
     if(detail.sale_status!=='completed'){notify('La venta debe estar vigente para devolver productos.','error');return;}
     if(reason.trim().length<5){notify('Describe el motivo de devolución (mínimo cinco caracteres).','error');return;}
     if(!inspectionConfirmed){notify('Debes confirmar la inspección y recepción física del producto.','error');return;}
@@ -161,6 +182,13 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
         Math.abs(i.selected_qty*1000-Math.round(i.selected_qty*1000))>0.000001){
         notify('La cantidad excede lo pendiente de devolver: '+i.product_name_snapshot,'error');return;
       }
+    }
+    if(denied){
+      if(reason.trim().length<10){notify('Describe la evaluación con al menos 10 caracteres.','error');return;}
+      if(outcome==='rejected'&&(!evidence.trim()||custody!=='customer')){notify('El rechazo requiere evidencia y confirmar que el producto queda con el cliente.','error');return;}
+      if(!window.confirm('¿Registrar la evaluación? No se devolverá dinero ni se modificará el inventario.'))return;
+      const body={assessment:true,request_id:newId(),sale_id:Number(saleId),outcome,custody,observations:reason.trim(),evidence_reference:evidence.trim(),inspection_confirmed:true,items:selected.map(i=>({sale_item_id:Number(i.sale_item_id),quantity:i.selected_qty,...(i.serials?{serial_numbers:i.serials}:{})}))};
+      sessionStorage.setItem(pendingKey,JSON.stringify(body));setPending(body);void saveAssessment(body);return;
     }
     const kind=returnKind;
     const notice=kind==='commercial'?'Las unidades aptas para reventa volverán al stock del local.':'Las unidades por garantía quedarán registradas fuera del stock vendible.';
@@ -201,8 +229,9 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
     <div className="role-nav" aria-label="Vistas de postventa">
       <button type="button" className={view==='new'?'primary':'ghost'} onClick={()=>setView('new')}>Nueva devolución</button>
       <button type="button" className={view==='history'?'primary':'ghost'} onClick={()=>setView('history')}>Historial</button>
+      <button type="button" className={view==='assessments'?'primary':'ghost'} onClick={()=>{setView('assessments');void loadAssessments();}}>Evaluaciones</button>
     </div>
-    {view==='history'&&pending&&<p className="warning-box">Existe un registro pendiente de confirmar. Revisa el historial y vuelve a Nueva devolución para reintentar el mismo registro.</p>}
+    {view!=='new'&&pending&&<p className="warning-box">Existe un registro pendiente de confirmar. Revisa el historial y vuelve a Nueva devolución para reintentar el mismo registro.</p>}
     {view==='new'&&<section className="panel pad returns-form-panel">
       <div className="panel-heading"><div><h3>1. Localizar venta</h3><p>Escanea un código o busca la venta original.</p></div></div>
       <form className="origin-search" onSubmit={searchSale}>
@@ -236,60 +265,76 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
             <select value={returnKind} disabled={locked} onChange={e=>{setReturnKind(e.target.value);setInspectionConfirmed(false);}}>
               <option value="commercial">Devolución comercial · está en buen estado</option>
               <option value="warranty">Garantía · presenta falla de origen</option>
-              <option value="customer_damage">Dañado por mal uso del cliente · requiere revisión</option>
+              <option value="customer_damage">Posible daño por mal uso · requiere evaluación</option>
             </select>
           </label>
-          <label>Solución solicitada
-            <select value={resolution} disabled={locked||denied} onChange={e=>setResolution(e.target.value)}>
+          {denied?<label>Resultado de la evaluación
+            <select value={outcome} disabled={locked} onChange={e=>{setOutcome(e.target.value);setInspectionConfirmed(false);if(e.target.value==='rejected')setCustody('customer');}}>
+              <option value="pending_review">Pendiente de evaluación técnica</option>
+              <option value="rejected">Rechazado con justificación</option>
+              <option value="technical_service">Derivar a servicio técnico</option>
+            </select>
+          </label>:<label>Solución solicitada
+            <select value={resolution} disabled={locked} onChange={e=>setResolution(e.target.value)}>
               <option value="refund">Devolución del dinero</option>
               <option value="exchange">Cambio del producto</option>
               <option value="repair">Reparación</option>
             </select>
-          </label>
+          </label>}
         </div>
         {denied?<p className="warning-box" role="alert">
-          El daño atribuido al uso del cliente no puede registrarse automáticamente como devolución comercial.
-          Debe revisarse el caso y su evidencia. Si el daño era un defecto de origen, selecciona «Garantía».
+          Registra una evaluación, no una devolución. No se modifica el inventario ni se genera reembolso. Un posible mal uso no acredita por sí solo el rechazo de una garantía; documenta la evidencia. Si hay defecto de origen, usa Garantía.
         </p>:returnKind==='warranty'?<p className="discount-approval-notice">
           <strong>Garantía por defecto de origen</strong> La recepción se registra, pero las unidades no se suman al stock vendible. En Chile, la garantía legal contempla devolución, cambio o reparación cuando corresponde; el caso se debe evaluar.
         </p>:<p className="helper">
           Solo acepta productos completos y en condiciones aptas para reventa. Estas unidades se reingresarán al local de venta.
         </p>}
-        {!denied&&<label className="returns-inspection-confirm">
+        {denied&&<div className="returns-choice-grid">
+          <label>¿Quién conserva el producto?
+            <select value={custody} disabled={locked||outcome==='rejected'} onChange={e=>{setCustody(e.target.value);setInspectionConfirmed(false);}}>
+              <option value="customer">Cliente (no queda retenido)</option>
+              <option value="evaluation">Recibido para evaluación (no stock vendible)</option>
+            </select>
+          </label>
+          <label>Referencia de evidencia o informe técnico {outcome==='rejected'?'(obligatoria)':'(opcional)'}
+            <input value={evidence} maxLength={250} disabled={locked} required={outcome==='rejected'} onChange={e=>setEvidence(e.target.value)} placeholder="Identificador de informe o fotografías archivadas"/>
+          </label>
+        </div>}
+        <label className="returns-inspection-confirm">
           <input type="checkbox" checked={inspectionConfirmed} disabled={locked} onChange={e=>setInspectionConfirmed(e.target.checked)}/>
-          <span>{returnKind==='commercial'
+          <span>{denied?'Confirmo la inspección y la situación de custodia indicada. Si rechazo, cuento con evidencia que sustenta la decisión y el producto queda con el cliente.':returnKind==='commercial'
             ?'Confirmo que recibí y revisé físicamente el producto, está completo y en condiciones aptas para reventa.'
             :'Confirmo que recibí físicamente el producto para tramitar una garantía, y que NO volverá al stock vendible.'}</span>
-        </label>}
+        </label>
         <div className="returns-line-list">
           {items.map(line=>{
             const available=Math.max(0,Number(line.quantity)-Number(line.returned_qty));
             return <div className="returns-line" key={line.sale_item_id}>
               <div><strong>{line.product_name_snapshot}</strong><small>{qtyFormat(available)} de {qtyFormat(line.quantity)} {line.sale_unit} disponibles para devolución · Vendido a {pesos(line.unit_price_clp)}</small></div>
-              {line.serial_units?.length?<div><strong>Selecciona las series recibidas</strong><p className="helper">{(chosenSeries[line.sale_item_id]||[]).length} seleccionadas</p><div style={{maxHeight:230,overflowY:'auto'}}>{line.serial_units.map(u=>{const picked=(chosenSeries[line.sale_item_id]||[]).includes(u.serial_number);const blocked=!!u.reversal_kind||u.status!=='sold';return <label key={u.unit_id}><input type="checkbox" checked={picked} disabled={locked||denied||blocked||available<=0} onChange={e=>{const checked=e.target.checked;setChosenSeries(a=>({...a,[line.sale_item_id]:checked?[...new Set([...(a[line.sale_item_id]||[]),u.serial_number]) ]:(a[line.sale_item_id]||[]).filter(n=>n!==u.serial_number)}));}}/>{u.serial_number}{blocked?' · Ya retornada o no disponible':''}</label>;})}</div></div>:<label>Cantidad a devolver
+              {line.serial_units?.length?<div><strong>{denied?'Selecciona las series evaluadas':'Selecciona las series recibidas'}</strong><p className="helper">{(chosenSeries[line.sale_item_id]||[]).length} seleccionadas</p><div style={{maxHeight:230,overflowY:'auto'}}>{line.serial_units.map(u=>{const picked=(chosenSeries[line.sale_item_id]||[]).includes(u.serial_number);const blocked=!!u.reversal_kind||u.status!=='sold';return <label key={u.unit_id}><input type="checkbox" checked={picked} disabled={locked||blocked||available<=0} onChange={e=>{const checked=e.target.checked;setChosenSeries(a=>({...a,[line.sale_item_id]:checked?[...new Set([...(a[line.sale_item_id]||[]),u.serial_number]) ]:(a[line.sale_item_id]||[]).filter(n=>n!==u.serial_number)}));}}/>{u.serial_number}{blocked?' · Ya retornada o no disponible':''}</label>;})}</div></div>:<label>{denied?'Cantidad evaluada':'Cantidad a devolver'}
                 <input type="number" min="0" max={available} step={line.sale_unit==='unidad'?'1':'0.001'}
                   value={quantities[line.sale_item_id]??''} placeholder="0"
-                  disabled={locked||denied||available<=0}
+                  disabled={locked||available<=0}
                   onChange={e=>setQuantities(q=>({...q,[line.sale_item_id]:e.target.value}))}/>
               </label>}
             </div>;
           })}
           {!remaining&&<p className="muted">Todos los productos de esta venta ya fueron devueltos.</p>}
         </div>
-        <label>Motivo y observaciones
-          <textarea rows="3" required maxLength={250} minLength={5} value={reason} disabled={locked||denied}
-            placeholder="Ej. El cliente solicitó cambio; se verificó producto sin uso y con embalaje completo"
+        <label>{denied?'Observaciones y justificación de la evaluación':'Motivo y observaciones'}
+          <textarea rows="3" required maxLength={denied?1000:250} minLength={denied?10:5} value={reason} disabled={locked}
+            placeholder={denied?'Describe daños observados, comprobaciones y motivo de la decisión':'Ej. El cliente solicitó cambio; producto apto para reventa'}
             onChange={e=>setReason(e.target.value)}/>
         </label>
-        <div className="returns-total"><span>Importe estimado de los productos seleccionados</span><strong>{pesos(total)}</strong></div>
+        {!denied&&<div className="returns-total"><span>Importe estimado de los productos seleccionados</span><strong>{pesos(total)}</strong></div>}
         {resolution==='refund'&&!denied&&<p className="helper">El importe se calcula sobre el precio efectivamente cobrado, no el precio actual. El reembolso quedará pendiente hasta que confirmes que se pagó fuera del sistema.</p>}
         {resolution!=='refund'&&!denied&&<p className="helper">El cambio o la reparación se registrará como solución solicitada; Tito POS no despacha productos de reemplazo ni gestiona reparaciones automáticamente.</p>}
-        <button className="primary wide" disabled={locked||denied||!inspectionConfirmed||!selected.length||!remaining||backendMissing||detail.sale_status!=='completed'}>
-          {busy?'Registrando…':'Registrar devolución'}
+        <button className="primary wide" disabled={locked||!inspectionConfirmed||!selected.length||!remaining||backendMissing||detail.sale_status!=='completed'||(denied&&outcome==='rejected'&&!evidence.trim())}>
+          {busy?'Registrando…':denied?'Registrar evaluación':'Registrar devolución'}
         </button>
       </form>}
       {pending&&<div className="warning-box" role="alert">
-        <strong>Devolución con resultado no confirmado</strong>
+        <strong>Operación con resultado no confirmado</strong>
         <p>No generes otra devolución para estas unidades antes de verificar el historial.</p>
         <button type="button" className="primary" disabled={busy} onClick={()=>void saveReturn(pending)}>Reintentar el mismo registro</button>
         <button type="button" className="ghost" disabled={busy} onClick={()=>{
@@ -304,6 +349,18 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
       </div>}
     </section>}
 
+    {view==='assessments'&&<section className="panel pad">
+      <div className="panel-heading"><div><h3>Evaluaciones de postventa</h3><p>Solicitudes y rechazos registrados sin movimientos de stock o dinero.</p></div><button className="ghost" onClick={()=>void loadAssessments()}>Actualizar</button></div>
+      {assessmentError&&<p role="alert" className="warning-box">{assessmentError}</p>}
+      {!assessmentError&&!assessments.length&&<p className="muted">No hay evaluaciones registradas.</p>}
+      {assessments.map(a=><details key={a.id} className="returns-sale-history"><summary><strong>Evaluación #{a.id} · Venta #{a.sale_id} · {assessmentLabels[a.outcome]}</strong> · {dateChile(a.created_at)}</summary>
+        <p>{a.observations}</p><p className="helper">Responsable: {a.actor_email} · Custodia: {a.custody==='customer'?'Cliente':'Recibido para evaluación'}</p>
+        {a.evidence_reference&&<p>Referencia: {a.evidence_reference}</p>}
+        {(a.items||[]).map(i=><p key={i.sale_item_id}>{i.product_name} · {qtyFormat(i.quantity)}{i.serial_numbers?.length?' · Series: '+i.serial_numbers.join(', '):''}</p>)}
+        <button type="button" className="ghost mini" disabled={locked} onClick={()=>chooseSale(a.sale_id)}>Consultar venta</button>
+      </details>)}
+      <p className="helper">Últimas 100 evaluaciones. El seguimiento de servicio técnico, cambios de estado y adjuntos se incorporarán en una etapa posterior.</p>
+    </section>}
     {view==='history'&&<section className="panel returns-history">
       <div className="panel-heading pad"><div><h3>Últimas devoluciones</h3><p>Historial auditable del negocio</p></div>
         <button className="ghost" type="button" disabled={loading} onClick={()=>void loadHistory()}>↻ Actualizar</button>

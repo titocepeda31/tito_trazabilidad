@@ -15,6 +15,68 @@ function registerCustomerReturnRoutes(RouteCollectorProxy $group): void {
     });
 
     // Search current business only; an exact serial resolves to its latest unreversed sale.
+    $group->get('/returns/assessments',static function(Request $request,Response $response): Response {
+        $admin=adminOnly($request);$biz=(int)$admin['business_id'];
+        $st=db()->prepare('SELECT a.id,a.sale_id,a.outcome,a.observations,a.evidence_reference,a.custody,a.items_json,a.created_at,u.email AS actor_email FROM customer_return_assessments a JOIN users u ON u.id=a.created_by AND u.business_id=a.business_id WHERE a.business_id=? ORDER BY a.id DESC LIMIT 100');
+        $st->execute([$biz]);$rows=$st->fetchAll();
+        foreach($rows as &$r){$r['items']=json_decode($r['items_json'],true,512,JSON_THROW_ON_ERROR);unset($r['items_json']);}unset($r);
+        return respond($response,['assessments'=>$rows]);
+    });
+
+    $group->post('/sales/{id:[0-9]+}/return-assessments',static function(Request $request,Response $response,array $args): Response {
+        $admin=adminOnly($request);$biz=(int)$admin['business_id'];$uid=(int)$admin['id'];$saleId=(int)$args['id'];
+        $body=requestBody($request);
+        if(array_diff(array_keys($body),['request_id','outcome','observations','evidence_reference','custody','inspection_confirmed','items']))fail('Campos de evaluación no permitidos.',422);
+        $rid=$body['request_id']??null;
+        if(!is_string($rid)||!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i',$rid))fail('Identificador inválido.',422);
+        $rid=strtolower($rid);$outcome=$body['outcome']??null;$custody=$body['custody']??null;
+        if(!in_array($outcome,['pending_review','rejected','technical_service'],true))fail('Resultado inválido.',422);
+        if(!in_array($custody,['customer','evaluation'],true))fail('Indica quién conserva el producto.',422);
+        if($outcome==='rejected'&&$custody!=='customer')fail('Para cerrar el rechazo, registra la entrega del producto al cliente.',422);
+        if(($body['inspection_confirmed']??false)!==true)fail('Confirma la inspección y la situación registrada.',422);
+        $obs=requireString($body,'observations',1000);if(mb_strlen(trim($obs))<10)fail('Describe la evaluación con al menos 10 caracteres.',422);
+        $ref=$body['evidence_reference']??'';if(!is_string($ref)||!mb_check_encoding($ref,'UTF-8')||mb_strlen(trim($ref))>250)fail('Referencia de evidencia inválida.',422);$ref=trim($ref);
+        if($outcome==='rejected'&&$ref==='')fail('Indica la referencia de evidencia o informe técnico que sustenta el rechazo.',422);
+        $rows=$body['items']??null;
+        if(!is_array($rows)||!array_is_list($rows)||count($rows)<1||count($rows)>80)fail('Selecciona entre 1 y 80 productos.',422);
+        $wanted=[];
+        foreach($rows as $r){
+            if(!is_array($r)||array_diff(array_keys($r),['sale_item_id','quantity','serial_numbers']))fail('Producto inválido.',422);
+            $line=filter_var($r['sale_item_id']??null,FILTER_VALIDATE_INT,['options'=>['min_range'=>1]]);
+            $qty=$r['quantity']??null;
+            if($line===false||isset($wanted[$line])||(!is_int($qty)&&!is_float($qty))||!is_finite((float)$qty)||$qty<=0||$qty>1000000000||abs($qty*1000-round($qty*1000))>0.000001)fail('Cantidad o línea inválida.',422);
+            $numbers=array_key_exists('serial_numbers',$r)?serialNormalizeList($r['serial_numbers']):[];sort($numbers,SORT_STRING);
+            $wanted[$line]=['quantity'=>number_format($qty,3,'.',''),'serial_numbers'=>$numbers];
+        }
+        ksort($wanted,SORT_NUMERIC);
+        $hash=hash('sha256',json_encode([$saleId,$outcome,$custody,$obs,$ref,$wanted],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
+        $db=db();try{
+            $db->beginTransaction();originLockCompany($db,$biz);
+            $st=$db->prepare('SELECT id,status FROM sales WHERE id=? AND business_id=? FOR UPDATE');$st->execute([$saleId,$biz]);$sale=$st->fetch();$st->closeCursor();if(!$sale)fail('Venta no encontrada.',404);
+            $st=$db->prepare('SELECT id,payload_hash FROM customer_return_assessments WHERE business_id=? AND request_id=?');$st->execute([$biz,$rid]);$previous=$st->fetch();$st->closeCursor();
+            if($previous){if(!hash_equals((string)$previous['payload_hash'],$hash))fail('Identificador reutilizado con datos distintos.',409);$db->commit();return respond($response,['assessment_id'=>(int)$previous['id'],'already_recorded'=>true]);}
+            if($sale['status']!=='completed')fail('La venta debe estar vigente.',409);
+            $st=$db->prepare('SELECT id FROM credit_accounts WHERE business_id=? AND sale_id=?');$st->execute([$biz,$saleId]);if($st->fetchColumn())fail('Venta a crédito: usa su flujo correspondiente.',409);$st->closeCursor();
+            $st=$db->prepare('SELECT si.id,si.product_name_snapshot,si.quantity,p.sale_unit,COALESCE(SUM(ri.quantity),0) AS returned_qty FROM sale_items si JOIN products p ON p.id=si.product_id AND p.business_id=? LEFT JOIN customer_return_items ri ON ri.sale_item_id=si.id WHERE si.sale_id=? GROUP BY si.id,si.product_name_snapshot,si.quantity,p.sale_unit');$st->execute([$biz,$saleId]);$lines=[];foreach($st->fetchAll() as $line)$lines[(int)$line['id']]=$line;$st->closeCursor();
+            $items=[];
+            foreach($wanted as $lineId=>$row){
+                $line=$lines[$lineId]??null;$qty=(float)$row['quantity'];$numbers=$row['serial_numbers'];
+                if(!$line||$qty>(float)$line['quantity']-(float)$line['returned_qty']+0.000001||($line['sale_unit']==='unidad'&&floor($qty)!==$qty))fail('Cantidad no disponible en la venta.',409);
+                $units=serialSaleLineUnits($db,$biz,$saleId,$lineId);
+                if($units){
+                    if($qty!==(float)count($numbers))fail('Selecciona una serie por unidad.',422);
+                    $valid=[];foreach($units as $u){if($u['status']==='sold'&&!$u['reversal_kind'])$valid[]=$u['serial_number'];}
+                    foreach($numbers as $number)if(!in_array($number,$valid,true))fail('Serie no disponible en esta venta.',409);
+                }elseif($numbers)fail('La línea no tiene series.',422);
+                $items[]=['sale_item_id'=>$lineId,'product_name'=>$line['product_name_snapshot'],'quantity'=>$row['quantity'],'serial_numbers'=>$numbers];
+            }
+            // No return, financial movement, stock or serial status mutation.
+            $st=$db->prepare('INSERT INTO customer_return_assessments(business_id,sale_id,created_by,request_id,payload_hash,outcome,observations,evidence_reference,custody,items_json) VALUES(?,?,?,?,?,?,?,?,?,?)');
+            $st->execute([$biz,$saleId,$uid,$rid,$hash,$outcome,$obs,$ref===''?null:$ref,$custody,json_encode($items,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE)]);
+            $id=(int)$db->lastInsertId();$db->commit();return respond($response,['assessment_id'=>$id],201);
+        }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
+    });
+
     $group->get('/returns/search',static function(Request $request,Response $response): Response {
         $admin=adminOnly($request);$biz=(int)$admin['business_id'];
         $q=$request->getQueryParams()['q']??'';

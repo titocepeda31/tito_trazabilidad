@@ -1,0 +1,5 @@
+# Evaluaciones por posible daño de cliente
+Migración 014 después de 013. Desplegar backend y frontend.
+Registro independiente: pendiente de evaluación, rechazo justificado (referencia de evidencia obligatoria y producto con cliente), derivación técnica. Guarda venta, líneas, series, usuario, fecha, observaciones, custodia y referencia externa. No altera stock, estado de serie, devolución, reembolso ni documento tributario. Reintentos con mismo UUID idempotentes. No determina automáticamente derechos ni bloquea futura garantía.
+Pendientes: carga segura de fotografías, resolución posterior del caso con historial de estados, integración con garantías/servicio técnico, búsqueda histórica por serie en evaluaciones y control físico de custodia. Referencia externa no equivale a adjunto verificado.
+Pruebas: registro de cada resultado, rechazo sin evidencia, sin cantidades/series, venta ajena, idempotencia, comprobar stock y caja antes/después, garantía posterior válida, despliegue 014. No usar operaciones reales.

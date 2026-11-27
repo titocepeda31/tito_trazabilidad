@@ -247,25 +247,38 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             $db->commit();return respond($response,['ok'=>true,'quote_id'=>$qid,'revision'=>$revision+1]);
         }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
     });
-    // Conversión sólo administrador: comprueba precios y stock nuevamente y genera una venta normal.
+    // Conversión sólo administrador: una venta por cotización aceptada, con precios históricos y series cuando corresponda.
     $group->post('/quotes/{id:[0-9]+}/convert',static function(Request $request,Response $response,array $args): Response {
         $admin=adminOnly($request);$biz=(int)$admin['business_id'];$uid=(int)$admin['id'];$qid=(int)$args['id'];
         $b=requestBody($request);
-        if(array_diff(array_keys($b),['payment_method','warehouse_id']))fail('Campos inesperados.',422);
+        if(array_diff(array_keys($b),['payment_method','warehouse_id','serial_items']))fail('Campos inesperados.',422);
         $payment=$b['payment_method']??null;
         if(!in_array($payment,['efectivo','transferencia','tarjeta','otro'],true))fail('Medio de pago inválido.',422);
+        $warehouse=originId($b['warehouse_id']??null,'warehouse_id');
+        $selection=$b['serial_items']??[];
+        if(!is_array($selection)||!array_is_list($selection)||count($selection)>50)fail('Selección de series inválida.',422);
+        $series=[];
+        foreach($selection as $line){
+            if(!is_array($line)||array_diff(array_keys($line),['product_id','serial_numbers']))fail('Línea de series inválida.',422);
+            $pid=originId($line['product_id']??null,'product_id');
+            if($pid===null||isset($series[$pid]))fail('Producto inválido o repetido en las series.',422);
+            $series[$pid]=serialNormalizeList($line['serial_numbers']??null);
+            if(!$series[$pid])fail('Selecciona al menos una serie por línea serializada.',422);
+        }
+        ksort($series,SORT_NUMERIC);
+        $conversionHash=hash('sha256',json_encode([$warehouse,$payment,$series],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
         $db=db();
         try{
             $db->beginTransaction();originLockCompany($db,$biz);
-            $saleLocation=titoSaleLocation($db,$admin,$b['warehouse_id']??null,true,$request);
-            $cashSessionId=titoCashSessionForSale($db,$admin,$saleLocation);
-            $st=$db->prepare('SELECT id,status,valid_until,converted_sale_id,client_id,customer_name,customer_rut FROM quotes WHERE business_id=? AND id=? FOR UPDATE');
-            $st->execute([$biz,$qid]);$quote=$st->fetch();$st->closeCursor();
-            if(!$quote)fail('Cotización no encontrada.',404);
+            $quote=quoteLock($db,$biz,$qid);
             if($quote['status']==='converted'){
+                $st=$db->prepare("SELECT payload_hash FROM quote_events WHERE business_id=? AND quote_id=? AND event_type='converted' ORDER BY id DESC LIMIT 1");
+                $st->execute([$biz,$qid]);$prior=$st->fetchColumn();$st->closeCursor();
+                if(($prior!==false&&$prior!==null&&!hash_equals((string)$prior,$conversionHash))||(($prior===false||$prior===null)&&$series))fail('La cotización ya fue convertida con otras condiciones. Consulta la venta #'.$quote['converted_sale_id'].'.',409);
                 $db->commit();return respond($response,['ok'=>true,'quote_id'=>$qid,'sale_id'=>(int)$quote['converted_sale_id'],'already_recorded'=>true]);
             }
             if($quote['status']!=='accepted')fail('Registra la aceptación del cliente antes de convertir.',409);
+            if($quote['client_id']===null)fail('La cotización debe tener un cliente registrado.',422);
             if($quote['client_id']!==null){
                 $st=$db->prepare('SELECT id FROM habitual_clients WHERE business_id=? AND id=? AND is_active=1 FOR UPDATE');$st->execute([$biz,(int)$quote['client_id']]);$found=$st->fetchColumn();$st->closeCursor();if(!$found)fail('El cliente de la cotización ya no está activo.',409);
             }
@@ -273,26 +286,47 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             $st=$db->prepare('SELECT product_id,product_name_snapshot,sale_unit,quantity,list_price_clp,unit_price_clp,discount_reason,subtotal_clp FROM quote_items WHERE quote_id=? ORDER BY product_id');
             $st->execute([$qid]);$items=$st->fetchAll();$st->closeCursor();
             if(!$items)fail('Cotización sin productos.',409);
-            // Cotización numerada, una sola venta por conversión (bloqueo de su fila).
-            $rid=sprintf('%08x-%04x-4%03x-%04x-%012x',random_int(0,0xffffffff),random_int(0,0xffff),random_int(0,0xfff),random_int(0x8000,0xbfff),random_int(0,0xffffffffffff));
-            $st=$db->prepare('INSERT INTO sales(business_id,sold_by,request_id,payment_method,total_clp,warehouse_id,cash_session_id,client_id,client_name_snapshot,client_rut_snapshot,customer_mode) VALUES(?,?,?,?,0,?,?,?,?,?,?)');
-            $st->execute([$biz,$uid,$rid,$payment,$saleLocation,$cashSessionId,$quote['client_id'],$quote['client_id']===null?null:$quote['customer_name'],$quote['customer_rut'],$quote['client_id']===null?null:'registered']);$sid=(int)$db->lastInsertId();
-            salesPointRecord($db,$admin,$request,$sid,$saleLocation);
+            $saleLocation=titoSaleLocation($db,$admin,$warehouse,true,$request);
+            $cashSessionId=titoCashSessionForSale($db,$admin,$saleLocation);
+            // Los productos se bloquean en el orden de la cotización (product_id).
+            // Se comprueba el conjunto de líneas completo antes de crear la venta.
             $stock=$db->prepare('SELECT id,name,stock_qty,price_clp,sale_unit FROM products WHERE id=? AND business_id=? AND is_active=1 FOR UPDATE');
-             $insert=$db->prepare('INSERT INTO sale_items(sale_id,product_id,product_name_snapshot,quantity,unit_price_clp,list_price_clp,discount_reason,subtotal_clp) VALUES(?,?,?,?,?,?,?,?)');
-            $total=0;
+            $controlledIds=[];
             foreach($items as $item){
                 $pid=(int)$item['product_id'];$qty=(float)$item['quantity'];
                 $stock->execute([$pid,$biz]);$p=$stock->fetch();$stock->closeCursor();
                 if(!$p)fail('Un producto ya no está activo.',409);
-                if(serialControlled($db,$biz,$pid))fail('Esta cotización contiene productos serializados. La conversión con selección de series aún está pendiente; no se descontó stock.',409);
                 if($p['sale_unit']!==$item['sale_unit'])fail('Un producto cambió de unidad. Revisa la cotización.',409);
-                // NO comparar price_clp vigente: quote_items contiene los precios acordados y su descuento.
-                // Una nueva tarifa del catálogo sólo se aplica a cotizaciones y ventas nuevas.
-                if((float)$p['stock_qty']+0.00001<$qty)fail('Stock total insuficiente para '.$p['name'],409);
-                 $next=number_format(max(0,(float)$p['stock_qty']-$qty),3,'.','');
-                $next=titoApplyLocationStock($db,$biz,$pid,$saleLocation,-$qty);
+                if($qty<=0||(float)$p['stock_qty']+0.00001<$qty)fail('Stock total insuficiente para '.$p['name'],409);
+                if(serialControlled($db,$biz,$pid)){
+                    $controlledIds[$pid]=true;
+                    if($p['sale_unit']!=='unidad'||$qty!==(float)count($series[$pid]??[]))throw new HttpError('Selecciona exactamente una serie por unidad de '.$p['name'].'.',422,'serial_numbers');
+                    serialReconcile($db,$biz,$pid,(float)$p['stock_qty']);
+                    serialRequireFree($db,$biz,$pid,$saleLocation,$qty);
+                }
+            }
+            if(array_diff_key($series,$controlledIds))fail('Se enviaron series para productos no serializados o ajenos a la cotización.',422);
+            // Cotización numerada, una sola venta por conversión (bloqueo de su fila).
+            $rid=sprintf('%08x-%04x-4%03x-%04x-%012x',random_int(0,0xffffffff),random_int(0,0xffff),random_int(0,0xfff),random_int(0x8000,0xbfff),random_int(0,0xffffffffffff));
+            $st=$db->prepare('INSERT INTO sales(business_id,sold_by,request_id,payment_method,total_clp,warehouse_id,cash_session_id,client_id,client_name_snapshot,client_rut_snapshot,customer_mode) VALUES(?,?,?,?,0,?,?,?,?,?,?)');
+            $st->execute([$biz,$uid,$rid,$payment,$saleLocation,$cashSessionId,$quote['client_id'],$quote['client_id']===null?null:$quote['customer_name'],$quote['customer_rut'],$quote['client_id']===null?null:'registered']);$sid=(int)$db->lastInsertId();
+            if($controlledIds){
+                $st=$db->prepare('INSERT INTO serial_sale_snapshots(sale_id,business_id,client_id,client_name,payload_hash) VALUES(?,?,?,?,?)');
+                $st->execute([$sid,$biz,(int)$quote['client_id'],$quote['customer_name'],$conversionHash]);
+            }
+            salesPointRecord($db,$admin,$request,$sid,$saleLocation);
+             $insert=$db->prepare('INSERT INTO sale_items(sale_id,product_id,product_name_snapshot,quantity,unit_price_clp,list_price_clp,discount_reason,subtotal_clp) VALUES(?,?,?,?,?,?,?,?)');
+            $total=0;
+            foreach($items as $item){
+                $pid=(int)$item['product_id'];$qty=(float)$item['quantity'];
+                // El precio se obtiene exclusivamente de quote_items, no de la solicitud o del catálogo.
+                $next=isset($controlledIds[$pid])?titoSellSerialLocationStock($db,$biz,$pid,$saleLocation,$qty):titoApplyLocationStock($db,$biz,$pid,$saleLocation,-$qty);
                 $insert->execute([$sid,$pid,$item['product_name_snapshot'],$item['quantity'],$item['unit_price_clp'],$item['list_price_clp'],$item['discount_reason'],$item['subtotal_clp']]);
+                $lineId=(int)$db->lastInsertId();
+                if(isset($controlledIds[$pid])){
+                    serialSaleRecord($db,$admin,$pid,$saleLocation,$sid,$lineId,(int)$item['unit_price_clp'],$series[$pid]);
+                    serialReconcile($db,$biz,$pid,(float)$next);
+                }
                 move($db,$biz,$pid,$sid,$uid,'sale',number_format(-$qty,3,'.',''),$next,'Venta desde cotización #'.$qid);
                 $total+=(int)$item['subtotal_clp'];
             }
@@ -302,7 +336,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             $st->execute([$sid,$qid,$biz]);
             if($st->rowCount()!==1)throw new RuntimeException('No se pudo convertir la cotización.');
             titoCashRegisterSale($db,$biz,$uid,$cashSessionId,$sid,$rid,$total,$payment);
-            quoteEvent($db,$biz,$qid,$uid,'converted','accepted','converted',null,['sale_id'=>$sid,'total_clp'=>$total]);
+            quoteEvent($db,$biz,$qid,$uid,'converted','accepted','converted',null,['sale_id'=>$sid,'total_clp'=>$total,'warehouse_id'=>$saleLocation,'payment_method'=>$payment,'serial_items'=>$series],null,$conversionHash);
             $db->commit();
             return respond($response,['ok'=>true,'quote_id'=>$qid,'sale_id'=>$sid,'total_clp'=>$total,'warehouse_id'=>$saleLocation],201);
         }catch(Throwable $e){

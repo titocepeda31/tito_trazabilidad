@@ -2,13 +2,13 @@ import React,{useEffect,useMemo,useState} from 'react';
 import {newId,pesos,qtyFormat} from './api.js';
 import {openQuoteEmail,shareQuotePdf} from './quoteShare.js';
 import QuoteClientPicker from './QuoteClientPicker.jsx';
+import QuoteConversionPanel from './QuoteConversionPanel.jsx';
 
 const defaultDate=()=>{const d=new Date();d.setDate(d.getDate()+7);return d.toLocaleDateString('sv-SE',{timeZone:'America/Santiago'});};
 const storage='tito_pending_quote';
 const statusNames={draft:'Borrador',sent:'Enviada',accepted:'Aceptada',rejected:'Rechazada',expired:'Vencida',converted:'Convertida'};
 const statusOf=q=>q.effective_status||q.status;
 const eventNames={created:'Creada',edited:'Borrador editado',sent:'Envío registrado',accepted:'Aceptación registrada',rejected:'Rechazo registrado',converted:'Convertida en venta'};
-const paymentOptions=[['efectivo','Efectivo'],['transferencia','Transferencia'],['tarjeta','Tarjeta'],['otro','Otro']];
 export default function QuotesPanel({products,request,notify,onSale,businessName}){
   const [quotes,setQuotes]=useState([]);
   const [customer,setCustomer]=useState(null);
@@ -25,7 +25,6 @@ export default function QuotesPanel({products,request,notify,onSale,businessName
   const [selected,setSelected]=useState(null);
   const [busy,setBusy]=useState(false);
   const [loading,setLoading]=useState(false);
-  const [payment,setPayment]=useState('efectivo');
   const [saleLocationId,setSaleLocationId]=useState(null);
   const [saleLocations,setSaleLocations]=useState([]);
   const [recipientEmail,setRecipientEmail]=useState('');
@@ -77,16 +76,8 @@ export default function QuotesPanel({products,request,notify,onSale,businessName
       setRecipientEmail(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact)?contact:'');
     }catch(e){notify(e.message,'error');}finally{setBusy(false);}
   }
-  async function convert(){
-    if(!selected||statusOf(selected.quote)!=='accepted'||!saleLocationId||selected.items.some(i=>Number(i.serial_control)===1))return;
-    if(!window.confirm('Se respetarán los precios pactados mientras la cotización esté vigente. Se verificará stock y disponibilidad. ¿Convertir cotización #'+selected.quote.id+' en venta con pago '+payment+'?'))return;
-    setBusy(true);
-    try{
-      const r=await request('/quotes/'+selected.quote.id+'/convert',{method:'POST',body:{payment_method:payment,warehouse_id:saleLocationId}});
-      notify('Venta #'+r.sale_id+' registrada desde cotización. Stock descontado.','success');
-      await refresh();await view(selected.quote.id);await onSale();
-    }catch(e){notify('No se pudo convertir: '+e.message,'error');}
-    finally{setBusy(false);}
+  async function conversionDone(id){
+    await refresh();await view(id);await onSale();
   }
   async function sharePdf(){
     if(!selected)return;
@@ -131,6 +122,7 @@ export default function QuotesPanel({products,request,notify,onSale,businessName
   }
   const shown=quotes.filter(q=>(statusFilter==='all'||statusOf(q)===statusFilter)&&[q.id,q.customer_name,q.customer_rut,statusNames[statusOf(q)]].some(v=>String(v??'').toLocaleLowerCase('es-CL').includes(quoteQuery.trim().toLocaleLowerCase('es-CL'))));
   const hasSerial=Boolean(selected?.items.some(i=>Number(i.serial_control)===1));
+  if(screen==='convert'&&selected)return <QuoteConversionPanel key={selected.quote.id} data={selected} request={request} notify={notify} locations={saleLocations} initialLocation={saleLocationId} onBack={()=>setScreen('detail')} onDone={()=>conversionDone(selected.quote.id)} onCheck={()=>view(selected.quote.id)}/>;
   return <div className="quotes-page">
     {screen==='list'&&<div className="section-intro"><div><p className="eyebrow">VENTAS</p><h2>Cotizaciones</h2><p className="muted">Presupuesta sin descontar ni reservar existencias.</p></div><button type="button" className="primary" disabled={busy} onClick={openNew}>+ Nueva cotización</button></div>}
     {screen==='new'&&<><div className="section-intro"><div><button type="button" className="text-button" disabled={locked} onClick={backFromNew}>← Volver a cotizaciones</button><h2>{editing?'Editar borrador #'+editing.id:'Nueva cotización'}</h2><p className="muted">Selecciona un cliente y los productos a cotizar.</p></div></div><section className="panel pad quote-form">
@@ -170,7 +162,7 @@ export default function QuotesPanel({products,request,notify,onSale,businessName
         {statusOf(selected.quote)==='expired'&&<p className="warning-box">Cotización vencida. No se puede convertir; crea una nueva.</p>}
         <h3>Historial de cambios</h3>
         {!(selected.events||[]).length&&<p className="helper">Sin eventos registrados desde la incorporación del historial.</p>}
-        {(selected.events||[]).map(e=><details key={e.id}><summary><strong>{eventNames[e.event_type]||e.event_type}</strong> · {String(e.created_at).slice(0,16)}</summary><p>{e.actor_email} {e.note?'· '+e.note:''}</p>{e.event_type==='edited'&&e.details&&<><p>Total anterior: {pesos(e.details.before?.total_clp)} → {pesos(e.details.after?.total_clp)}</p><p>Productos antes: {(e.details.items_before||[]).map(i=>i.product_name_snapshot+' × '+qtyFormat(i.quantity)+' · '+pesos(i.unit_price_clp)).join('; ')}</p><p>Productos después: {(e.details.items_after||[]).map(i=>i.product_name_snapshot+' × '+qtyFormat(i.quantity)+' · '+pesos(i.unit_price_clp)).join('; ')}</p></>}</details>)}
+        {(selected.events||[]).map(e=><details key={e.id}><summary><strong>{eventNames[e.event_type]||e.event_type}</strong> · {String(e.created_at).slice(0,16)}</summary><p>{e.actor_email} {e.note?'· '+e.note:''}</p>{e.event_type==='converted'&&e.details&&<><p>Venta #{e.details.sale_id} · {pesos(e.details.total_clp)}</p>{Object.entries(e.details.serial_items||{}).map(([pid,numbers])=><p key={pid}>{selected.items.find(i=>String(i.product_id)===pid)?.product_name_snapshot||'Producto #'+pid}: {numbers.join(', ')}</p>)}</>}{e.event_type==='edited'&&e.details&&<><p>Total anterior: {pesos(e.details.before?.total_clp)} → {pesos(e.details.after?.total_clp)}</p><p>Productos antes: {(e.details.items_before||[]).map(i=>i.product_name_snapshot+' × '+qtyFormat(i.quantity)+' · '+pesos(i.unit_price_clp)).join('; ')}</p><p>Productos después: {(e.details.items_after||[]).map(i=>i.product_name_snapshot+' × '+qtyFormat(i.quantity)+' · '+pesos(i.unit_price_clp)).join('; ')}</p></>}</details>)}
       </section>
       <div className="quote-share-tools">
         <label>Correo del cliente (opcional)<input type="email" placeholder="cliente@empresa.cl" value={recipientEmail} onChange={e=>setRecipientEmail(e.target.value)}/></label>
@@ -179,7 +171,6 @@ export default function QuotesPanel({products,request,notify,onSale,businessName
         <button type="button" className="ghost" onClick={()=>window.print()}>Imprimir / guardar PDF</button>
         <p className="helper">Compartir PDF abre el menú del teléfono: selecciona Gmail u otra app y confirma el envío. «Preparar correo» incluye el detalle como texto, sin adjuntar PDF automáticamente.</p>
       </div>
-      {selected.quote.status!=='converted'&&hasSerial&&<p className="warning-box">Contiene productos serializados. La conversión con selección de series se implementará en la siguiente fase. No se descontará inventario por esta cotización.</p>}
-      {statusOf(selected.quote)==='accepted'&&!hasSerial&&<><label>Sucursal que venderá<select aria-label="Sucursal que venderá" disabled={busy||!saleLocationId} value={saleLocationId||''} onChange={e=>setSaleLocationId(Number(e.target.value))}>{saleLocations.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label><label>Medio de pago<select value={payment} disabled={busy} onChange={e=>setPayment(e.target.value)}>{paymentOptions.map(([v,l])=><option value={v} key={v}>{l}</option>)}</select></label><button type="button" className="primary" disabled={busy||!saleLocationId} onClick={convert}>Convertir en venta</button></>}</div></section>}
+      {statusOf(selected.quote)==='accepted'&&<section className="panel pad formstack"><h3>Convertir en venta</h3><p>{hasSerial?'Identifica las series de cada equipo que entregarás.':'Verifica bodega, pago y disponibilidad.'} Los precios y cantidades se conservan según la cotización.</p><button type="button" className="primary" disabled={busy||!saleLocationId||!selected.quote.client_id} onClick={()=>setScreen('convert')}>Preparar venta</button>{!saleLocationId&&<p className="helper">No se pudo determinar una ubicación de venta.</p>}</section>}</div></section>}
   </div>;
 }

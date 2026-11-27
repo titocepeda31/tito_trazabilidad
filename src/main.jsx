@@ -977,10 +977,11 @@ function SalesPanel({sales,onRefresh,request,notify,canVoid,onStartReturn,busine
     const f=new FormData(e.currentTarget);
     const reason=String(f.get('reason')||'').trim();
     if(reason.length<5){notify('El motivo debe contener al menos 5 caracteres.','error');return;}
+    if(voidTarget.serial_client_name&&f.get('serial_inspection_confirmed')!=='on'){notify('Confirma la recepción física y estado de todas las series vendidas.','error');return;}
     if(!window.confirm('¿Anular la venta #'+voidTarget.id+' y reponer todo su stock? No se reembolsará dinero ni se anularán documentos tributarios.'))return;
     setBusy(true);
     try{
-      const result=await request('/sales/'+voidTarget.id+'/void',{method:'POST',body:{reason}});
+      const result=await request('/sales/'+voidTarget.id+'/void',{method:'POST',body:{reason,...(voidTarget.serial_client_name?{serial_inspection_confirmed:f.get('serial_inspection_confirmed')==='on'}:{})}});
       setVoidTarget(null);
       notify('Venta #'+result.sale_id+' anulada. Stock repuesto; comprueba cualquier devolución de dinero por separado.','success');
       await onRefresh();
@@ -1012,8 +1013,8 @@ function SalesPanel({sales,onRefresh,request,notify,canVoid,onStartReturn,busine
         <p className="helper">Se abrirá un PDF con el detalle de esta venta; podrás imprimirlo o guardarlo desde el navegador.</p>
       </div>
       {canVoid&&detail.sale.status!=='voided'&&creditSales[detail.sale.id]&&<p className="warning-box">Esta venta es a crédito. Para registrar una devolución, una anulación completa o un reembolso, usa Más → Clientes y crédito → Cuentas por cobrar → Ver / gestionar. Allí se ajustan conjuntamente deuda e inventario.</p>}
-      {detail.sale.serial_client_name&&<p><strong>Cliente:</strong> {detail.sale.serial_client_name}. Las devoluciones y anulaciones de equipos por serie están pendientes.</p>}
-      {canVoid&&detail.sale.status!=='voided'&&!creditSales[detail.sale.id]&&!detail.sale.serial_client_name&&<div className="sale-return-actions"><button className="primary wide" type="button" disabled={busy} onClick={()=>{setDetail(null);onStartReturn(detail.sale.id);}}>↩ Registrar devolución de productos</button>
+      {detail.sale.serial_client_name&&<p><strong>Cliente:</strong> {detail.sale.serial_client_name}.</p>}
+      {canVoid&&detail.sale.status!=='voided'&&!creditSales[detail.sale.id]&&<div className="sale-return-actions"><button className="primary wide" type="button" disabled={busy} onClick={()=>{setDetail(null);onStartReturn(detail.sale.id);}}>↩ Registrar devolución de productos</button>
         {returnCount===0?<button className="ghost wide danger-button" disabled={busy} onClick={()=>setVoidTarget(detail.sale)}>Anular esta venta y reponer todo el stock</button>:<p className="helper">{returnCount>0?'Esta venta ya tiene devoluciones: no corresponde una anulación total.': 'La anulación total requiere verificar el historial de devoluciones en la API.'}</p>}
       </div>}
       <p className="helper">Registro interno de venta. No reemplaza boleta o factura del SII.</p>
@@ -1021,6 +1022,7 @@ function SalesPanel({sales,onRefresh,request,notify,canVoid,onStartReturn,busine
     {voidTarget&&<Modal title={'Anular venta #'+voidTarget.id} onClose={()=>setVoidTarget(null)}>
       <div className="warning-box"><strong>Operación irreversible desde Tito POS</strong><p>Se mantendrá el registro y se devolverán las cantidades al inventario una sola vez. No hay reembolso bancario ni anulación de boletas SII.</p></div>
       <form className="formstack" onSubmit={voidSale}>
+        {voidTarget.serial_client_name&&<label><input type="checkbox" name="serial_inspection_confirmed" required/> Confirmo que recibí físicamente todas las series de la venta, están completas y aptas para reventa.</label>}
         <label>Motivo de anulación<textarea name="reason" required minLength="5" maxLength="250" rows="3" placeholder="Ej. Venta registrada por error"/></label>
         <button className="primary wide" disabled={busy}>{busy?'Procesando…':'Confirmar anulación'}</button>
       </form>

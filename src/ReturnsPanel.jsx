@@ -20,7 +20,7 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
   const [historyPeriod,setHistoryPeriod]=useState('all');
   const [historyPage,setHistoryPage]=useState(1);
   const [creditPage,setCreditPage]=useState(1);
-  const [quantities,setQuantities]=useState({});
+  const [quantities,setQuantities]=useState({}),[chosenSeries,setChosenSeries]=useState({});
   const [returnKind,setReturnKind]=useState('commercial');
   const [resolution,setResolution]=useState('refund');
   const [reason,setReason]=useState('');
@@ -50,9 +50,10 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
   const items=detail?.items||[];
   const selected=useMemo(()=>items.map(i=>{
     const available=Math.max(0,Number(i.quantity)-Number(i.returned_qty));
-    const qty=Number(quantities[i.sale_item_id]||0);
-    return {...i,available,selected_qty:qty,amount:Math.round(qty*Number(i.unit_price_clp))};
-  }).filter(i=>i.selected_qty>0),[items,quantities]);
+    const serials=i.serial_units?.length?(chosenSeries[i.sale_item_id]||[]):null;
+    const qty=serials?serials.length:Number(quantities[i.sale_item_id]||0);
+    return {...i,available,selected_qty:qty,serials,amount:Math.round(qty*Number(i.unit_price_clp))};
+  }).filter(i=>i.selected_qty>0),[items,quantities,chosenSeries]);
   const total=selected.reduce((sum,i)=>sum+i.amount,0);
   const denied=returnKind==='customer_damage';
   const remaining=items.some(i=>Number(i.quantity)>Number(i.returned_qty)+0.000001);
@@ -77,7 +78,7 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
     setLoading(true);
     try{
       const data=await request('/sales/'+id+'/returns');
-      setDetail(data);setQuantities({});setBackendMissing(false);
+      setDetail(data);setQuantities({});setChosenSeries({});setBackendMissing(false);
     }catch(e){
       setDetail(null);
       if(e.status===404)setBackendMissing(true);
@@ -102,11 +103,11 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
         }
       });
       sessionStorage.removeItem(pendingKey);
-      setPending(null);setQuantities({});setReason('');setInspectionConfirmed(false);
+      setPending(null);setQuantities({});setChosenSeries({});setReason('');setInspectionConfirmed(false);
       notify(result.already_recorded?'Devolución ya registrada; no se duplicó stock.':'Devolución #'+result.return_id+' registrada. '+(result.restocked?'Unidades devueltas al stock del local.':'Producto defectuoso registrado sin reingreso a stock vendible.'),'success');
       await Promise.all([loadHistory(),loadSale(body.sale_id),onChange()]);
     }catch(e){
-      notify('No se pudo confirmar la devolución: '+e.message+'. Revisa el historial y reintenta con el mismo identificador; no generes otra devolución.', 'error');
+      if(e.status>=400&&e.status<500&&![408,429].includes(e.status)){sessionStorage.removeItem(pendingKey);setPending(null);notify('Devolución rechazada: '+e.message,'error');await loadSale(body.sale_id);}else notify('No se pudo confirmar la devolución: '+e.message+'. Revisa el historial y reintenta con el mismo identificador; no generes otra devolución.', 'error');
     }finally{setBusy(false);}
   }
   function submit(e){
@@ -130,7 +131,7 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
       request_id:newId(),sale_id:Number(saleId),return_kind:kind,
       item_condition:kind==='commercial'?'resellable':'defective',
       resolution,reason:reason.trim(),inspection_confirmed:true,
-      items:selected.map(i=>({sale_item_id:Number(i.sale_item_id),quantity:i.selected_qty}))
+      items:selected.map(i=>({sale_item_id:Number(i.sale_item_id),quantity:i.selected_qty,...(i.serials?{serial_numbers:i.serials}:{})}))
     };
     sessionStorage.setItem(pendingKey,JSON.stringify(body));
     setPending(body);void saveReturn(body);
@@ -206,12 +207,12 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
             const available=Math.max(0,Number(line.quantity)-Number(line.returned_qty));
             return <div className="returns-line" key={line.sale_item_id}>
               <div><strong>{line.product_name_snapshot}</strong><small>{qtyFormat(available)} de {qtyFormat(line.quantity)} {line.sale_unit} disponibles para devolución · Vendido a {pesos(line.unit_price_clp)}</small></div>
-              <label>Cantidad a devolver
+              {line.serial_units?.length?<div><strong>Selecciona las series recibidas</strong><p className="helper">{(chosenSeries[line.sale_item_id]||[]).length} seleccionadas</p><div style={{maxHeight:230,overflowY:'auto'}}>{line.serial_units.map(u=>{const picked=(chosenSeries[line.sale_item_id]||[]).includes(u.serial_number);const blocked=!!u.reversal_kind||u.status!=='sold';return <label key={u.unit_id}><input type="checkbox" checked={picked} disabled={locked||denied||blocked||available<=0} onChange={e=>{const checked=e.target.checked;setChosenSeries(a=>({...a,[line.sale_item_id]:checked?[...new Set([...(a[line.sale_item_id]||[]),u.serial_number]) ]:(a[line.sale_item_id]||[]).filter(n=>n!==u.serial_number)}));}}/>{u.serial_number}{blocked?' · Ya retornada o no disponible':''}</label>;})}</div></div>:<label>Cantidad a devolver
                 <input type="number" min="0" max={available} step={line.sale_unit==='unidad'?'1':'0.001'}
                   value={quantities[line.sale_item_id]??''} placeholder="0"
                   disabled={locked||denied||available<=0}
                   onChange={e=>setQuantities(q=>({...q,[line.sale_item_id]:e.target.value}))}/>
-              </label>
+              </label>}
             </div>;
           })}
           {!remaining&&<p className="muted">Todos los productos de esta venta ya fueron devueltos.</p>}
@@ -240,7 +241,7 @@ export default function ReturnsPanel({sales,request,notify,onChange,initialSaleI
       </div>}
       {detail?.returns?.length>0&&<div className="returns-sale-history">
         <h3>Devoluciones de esta venta</h3>
-        {detail.returns.map(r=><p key={r.id}>#{r.id} · {kindLabels[r.return_kind]} · {pesos(r.amount_clp)} · {resolutionLabels[r.resolution]}</p>)}
+        {detail.returns.map(r=><p key={r.id}>#{r.id} · {kindLabels[r.return_kind]} · {pesos(r.amount_clp)} · {resolutionLabels[r.resolution]}{r.serial_numbers?.length>0&&<small className="sub">Series: {r.serial_numbers.join(', ')}</small>}</p>)}
       </div>}
     </section>
 

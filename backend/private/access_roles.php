@@ -39,7 +39,7 @@ function accessRoutePermission(string $method,string $pattern): ?string {
     return match($method.' '.$pattern){
         'GET /me','POST /auth/logout','POST /account/password'=>'account.self',
         'GET /products','GET /warehouses/locations','GET /warehouses/stock','GET /access/branch-inventory'=>'inventory.view',
-        'POST /quotes'=>'quotes.create',
+        'POST /quotes','GET /quotes/clients'=>'quotes.create',
         'GET /sales','GET /sales/{id:[0-9]+}'=>'sales.own_view',
         'GET /quotes','GET /quotes/{id:[0-9]+}'=>'quotes.view',
         default=>null

@@ -5,6 +5,7 @@ const quoteLines=({quote,items},businessName)=>[
   safeText(businessName||'Negocio'),
   'COTIZACIÓN #'+quote.id,
   'Cliente: '+safeText(quote.customer_name),
+  ...(quote.customer_rut?['RUT: '+safeText(quote.customer_rut)]:[]),
   'Contacto: '+safeText(quote.customer_contact||'No indicado'),
   'Vigencia: '+safeText(quote.valid_until),
   '',
@@ -48,6 +49,7 @@ export async function createQuotePdf(data,businessName){
   write(safeText(businessName||'Tito POS'),16,true,[11,120,91]);
   write('COTIZACIÓN #'+quote.id,17,true,[26,42,53]);
   write('Cliente: '+quote.customer_name);
+  if(quote.customer_rut)write('RUT: '+quote.customer_rut);
   if(quote.customer_contact)write('Contacto: '+quote.customer_contact);
   write('Fecha: '+safeText(quote.created_at).slice(0,10)+'   |   Válida hasta: '+quote.valid_until);
   y+=5;

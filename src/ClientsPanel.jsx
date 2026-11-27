@@ -12,11 +12,11 @@ const dateChile=s=>{
   return Number.isFinite(d.valueOf())?d.toLocaleDateString('es-CL',{timeZone:'America/Santiago'}):String(s);
 };
 export default function ClientsPanel(props){
-  const [tab,setTab]=useState('commercial');
-  return <><div className="role-nav" aria-label="Gestión de clientes">
+  const [tab,setTab]=useState('commercial'),[editing,setEditing]=useState(false);
+  return <>{!editing&&<div className="role-nav" aria-label="Gestión de clientes">
     <button type="button" className={tab==='commercial'?'primary':'ghost'} onClick={()=>setTab('commercial')}>Clientes</button>
     <button type="button" className={tab==='credit'?'primary':'ghost'} onClick={()=>setTab('credit')}>Crédito heredado</button>
-  </div>{tab==='commercial'?<CommercialClientsPanel {...props}/>:<LegacyCreditPanel {...props}/>}</>;
+  </div>}{tab==='commercial'?<CommercialClientsPanel {...props} onEditingChange={setEditing}/>:<LegacyCreditPanel {...props}/>}</>;
 }
 function LegacyCreditPanel({request,notify,onChange}){
   const [clients,setClients]=useState([]);

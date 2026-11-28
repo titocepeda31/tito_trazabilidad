@@ -7,7 +7,7 @@ use Slim\Routing\RouteCollectorProxy;
 // Todas las mutaciones de reservas y salidas serializadas toman bloqueo de empresa.
 // Nombre histórico: ahora suma reservas de cualquier producto.
 function serialReservedQuantity(PDO $db,int $biz,int $pid,int $wid,?int $except=null): float {
-    $s=$db->prepare("SELECT i.quantity FROM serial_reservation_items i JOIN serial_reservations r ON r.id=i.reservation_id AND r.business_id=i.business_id WHERE i.business_id=? AND i.product_id=? AND r.warehouse_id=? AND r.status='pending' AND (? IS NULL OR r.id<>?) FOR UPDATE");
+    $s=$db->prepare("SELECT (i.quantity-i.dispatched_quantity) AS quantity FROM serial_reservation_items i JOIN serial_reservations r ON r.id=i.reservation_id AND r.business_id=i.business_id WHERE i.business_id=? AND i.product_id=? AND r.warehouse_id=? AND r.status='pending' AND (? IS NULL OR r.id<>?) FOR UPDATE");
     $s->execute([$biz,$pid,$wid,$except,$except]);$n=0.0;foreach($s->fetchAll() as $row)$n+=(float)$row['quantity'];$s->closeCursor();return round($n,3);
 }
 function serialRequireFree(PDO $db,int $biz,int $pid,int $wid,float $qty,?int $except=null): void {
@@ -25,6 +25,7 @@ function reservationLockForSale(PDO $db,int $biz,int $rid,int $client,int $wid,a
 }
 function reservationComplete(PDO $db,int $biz,int $rid,int $sale,int $uid): void {
     $s=$db->prepare("UPDATE serial_reservations SET status='dispatched',sale_id=?,closed_by=?,closed_at=UTC_TIMESTAMP() WHERE id=? AND business_id=? AND status='pending'");$s->execute([$sale,$uid,$rid,$biz]);if($s->rowCount()!==1)fail('Reserva no disponible.',409);
+    $s=$db->prepare('UPDATE serial_reservation_items SET dispatched_quantity=quantity WHERE business_id=? AND reservation_id=?');$s->execute([$biz,$rid]);
 }
 function registerReservationRoutes(RouteCollectorProxy $group): void {
     $group->get('/sales/reservations',static function(Request $request,Response $response): Response {
@@ -32,7 +33,7 @@ function registerReservationRoutes(RouteCollectorProxy $group): void {
         if($wid===false)fail('Bodega inválida.',422);$db=db();$wid=titoSaleLocation($db,$u,$wid,true,$request);
         $s=$db->prepare("SELECT r.id,r.quote_id,r.client_id,r.client_name,r.warehouse_id,r.status,r.note,r.sale_id,r.created_at,r.closed_at,r.cancel_reason,(r.created_by=? OR ?=1) AS can_cancel FROM serial_reservations r WHERE r.business_id=? AND r.warehouse_id=? ORDER BY (r.status='pending') DESC,r.id DESC LIMIT 100");
         $s->execute([(int)$u['id'],($u['role']??'')==='admin'?1:0,$biz,$wid]);$rows=$s->fetchAll();$s->closeCursor();
-        $s=$db->prepare('SELECT i.product_id,i.quantity,p.name,p.sku,p.sale_unit,EXISTS(SELECT 1 FROM serial_product_controls c WHERE c.business_id=i.business_id AND c.product_id=i.product_id) AS serial_control FROM serial_reservation_items i JOIN products p ON p.id=i.product_id AND p.business_id=i.business_id WHERE i.business_id=? AND i.reservation_id=? ORDER BY i.product_id');
+        $s=$db->prepare('SELECT i.product_id,i.quantity,i.dispatched_quantity,(i.quantity-i.dispatched_quantity) AS remaining_quantity,p.name,p.sku,p.sale_unit,EXISTS(SELECT 1 FROM serial_product_controls c WHERE c.business_id=i.business_id AND c.product_id=i.product_id) AS serial_control FROM serial_reservation_items i JOIN products p ON p.id=i.product_id AND p.business_id=i.business_id WHERE i.business_id=? AND i.reservation_id=? ORDER BY i.product_id');
         foreach($rows as &$r){$s->execute([$biz,$r['id']]);$r['items']=$s->fetchAll();$s->closeCursor();}unset($r);
         return respond($response,['reservations'=>$rows]);
     });

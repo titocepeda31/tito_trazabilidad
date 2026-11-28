@@ -41,21 +41,37 @@ export default function QuoteConversionPanel({data,request,notify,locations,init
   const [busy,setBusy]=useState(false),[error,setError]=useState(''),[uncertain,setUncertain]=useState(false),[confirmedSale,setConfirmedSale]=useState(null);
   const saving=useRef(false),reserveRequest=useRef(null);
   const [note,setNote]=useState('');
-  const serialLines=data.items.filter(i=>Number(i.serial_control)===1);
+  const pending=Object.fromEntries((data.reservation?.items||[]).map(i=>[Number(i.product_id),Number(i.remaining_quantity)]));
+  const delivered=Object.fromEntries((data.reservation?.items||[]).map(i=>[Number(i.product_id),Number(i.dispatched_quantity)]));
+  const [quantities,setQuantities]=useState(()=>Object.fromEntries((data.reservation?.items||[]).map(i=>[Number(i.product_id),String(i.remaining_quantity)])));
+  const dispatchRequest=useRef(null);
+  const activeItems=isDispatch?data.items.filter(i=>Number(quantities[i.product_id]||0)>0).map(i=>({...i,quantity:Number(quantities[i.product_id])})):data.items;
+  const serialLines=activeItems.filter(i=>Number(i.serial_control)===1);
+  const validDispatch=!isDispatch||(activeItems.length>0&&data.items.every(i=>{const n=Number(quantities[i.product_id]||0);return Number.isFinite(n)&&n>=0&&n<=Number(pending[i.product_id]||0)&&Math.abs(n*1000-Math.round(n*1000))<=0.00001&&(i.sale_unit!=='unidad'||Number.isInteger(n));}));
+  function dispatchSubtotal(i){
+    const before=Number(delivered[i.product_id]||0),qty=Number(quantities[i.product_id]||0),price=Number(i.unit_price_clp);
+    const after=Math.round((before+qty)*1000)/1000;
+    return (Math.abs(after-Number(i.quantity))<0.00001?Number(i.subtotal_clp):Math.round(after*price))-Math.round(before*price);
+  }
+  const dispatchTotal=isDispatch?data.items.reduce((sum,i)=>sum+dispatchSubtotal(i),0):Number(data.quote.total_clp);
+  function changeQty(pid,v){setQuantities(old=>({...old,[pid]:v}));setSeries(old=>({...old,[pid]:[]}));setError('');}
   const eligible=data.items.length>0&&data.items.every(i=>{const n=Number(i.quantity),controlled=Number(i.serial_control)===1;return Number.isFinite(n)&&n>0&&n<=1000000000&&Math.abs(n*1000-Math.round(n*1000))<=0.00001&&(i.sale_unit!=='unidad'||Number.isInteger(n))&&(!controlled||(i.sale_unit==='unidad'&&n<=500));});
-  const complete=isReserve?eligible:serialLines.every(i=>Number.isInteger(Number(i.quantity))&&Number(i.quantity)<=500&&Number(i.quantity)>0&&(series[i.product_id]||[]).length===Number(i.quantity));
+  const complete=isReserve?eligible:validDispatch&&serialLines.every(i=>Number.isInteger(Number(i.quantity))&&Number(i.quantity)<=500&&Number(i.quantity)>0&&(series[i.product_id]||[]).length===Number(i.quantity));
   function changeWarehouse(v){
     if(Object.values(series).some(a=>a.length)&&!window.confirm('Cambiar de bodega eliminará las series seleccionadas. ¿Continuar?'))return;
     setWarehouse(Number(v));setSeries({});setError('');
   }
   async function submit(){
     if(saving.current||!complete||!warehouse||confirmedSale||!data.quote.client_id)return;
-    if(!uncertain&&!window.confirm(isReserve?'¿Reservar todas las unidades de la cotización #'+data.quote.id+'? No se cobrará ni descontará stock físico.':'¿Confirmar la venta completa de la cotización #'+data.quote.id+' por '+pesos(data.quote.total_clp)+'? Verifica cantidades y, si corresponde, las series de los equipos que entregarás.'))return;
+    if(!uncertain&&!window.confirm(isReserve?'¿Reservar todas las unidades de la cotización #'+data.quote.id+'? No se cobrará ni descontará stock físico.':'¿Confirmar '+(isDispatch?'este despacho':'la venta completa')+' de la cotización #'+data.quote.id+' por '+pesos(dispatchTotal)+'? Verifica cantidades y, si corresponde, las series de los equipos que entregarás.'))return;
     saving.current=true;setBusy(true);setError('');
     try{
       let body;
       if(isReserve){reserveRequest.current??=newId();body={request_id:reserveRequest.current,revision:Number(data.quote.revision),warehouse_id:warehouse,note:note.trim()};}
-      else body={warehouse_id:warehouse,payment_method:payment,...(isDispatch?{reservation_id:Number(data.reservation.id)}:{}),serial_items:serialLines.map(i=>({product_id:Number(i.product_id),serial_numbers:series[i.product_id]||[]}))};
+      else {
+        if(isDispatch)dispatchRequest.current??=newId();
+        body={warehouse_id:warehouse,payment_method:payment,...(isDispatch?{reservation_id:Number(data.reservation.id),request_id:dispatchRequest.current,revision:Number(data.quote.revision),dispatch_items:activeItems.map(i=>({product_id:Number(i.product_id),quantity:Number(i.quantity)}))}:{}),serial_items:serialLines.map(i=>({product_id:Number(i.product_id),serial_numbers:series[i.product_id]||[]}))};
+      }
       const result=await request('/quotes/'+data.quote.id+(isReserve?'/reserve':'/convert'),{method:'POST',body});
       const id=isReserve?result.reservation_id:result.sale_id;
       if(!result.ok||!id)throw new Error('Respuesta no confirmada.');
@@ -64,7 +80,7 @@ export default function QuoteConversionPanel({data,request,notify,locations,init
       await onDone();
     }catch(e){
       const unknown=!(e.status>=400&&e.status<500&&![408,429].includes(e.status));
-      if(!unknown)reserveRequest.current=null;
+      if(!unknown){reserveRequest.current=null;dispatchRequest.current=null;}
       setUncertain(unknown);setError(unknown?'Resultado incierto. Reintenta con la misma selección o consulta la cotización antes de continuar.':e.message);
     }finally{saving.current=false;setBusy(false);}
   }
@@ -75,14 +91,14 @@ export default function QuoteConversionPanel({data,request,notify,locations,init
       <h3>{isReserve?'Condiciones de reserva':'Condiciones de venta'}</h3>
       <label>Bodega / sucursal de venta<select value={warehouse||''} disabled={locked||isDispatch} onChange={e=>changeWarehouse(e.target.value)}><option value="">Selecciona bodega</option>{isDispatch?<option value={warehouse}>{data.reservation.warehouse_name||'Bodega #'+warehouse}</option>:locations.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label>
       {isReserve?<label>Observación (opcional)<input value={note} maxLength={250} disabled={locked} onChange={e=>setNote(e.target.value)}/></label>:<label>Medio de pago<select value={payment} disabled={locked} onChange={e=>setPayment(e.target.value)}>{payments.map(([v,l])=><option value={v} key={v}>{l}</option>)}</select></label>}
-      <div className="table-wrap"><table><thead><tr><th>Producto</th><th>Cantidad</th><th>Precio pactado</th><th>Subtotal</th></tr></thead><tbody>{data.items.map(i=><tr key={i.id}><td>{i.product_name_snapshot}{Number(i.serial_control)===1&&<small className="sub">Requiere series</small>}</td><td>{qtyFormat(i.quantity)} {i.sale_unit}</td><td>{pesos(i.unit_price_clp)}</td><td>{pesos(i.subtotal_clp)}</td></tr>)}</tbody></table></div>
-      <div className="receipt-total"><span>Total acordado</span><strong>{pesos(data.quote.total_clp)}</strong></div><p className="helper">Precios y cantidades de la cotización no editables. {isReserve?'Se compromete stock libre por cantidad, sin cobro ni salida física.':'La venta completa requiere caja habilitada.'}</p>
+      <div className="table-wrap"><table><thead><tr><th>Producto</th><th>Cantidad cotizada</th>{isDispatch&&<><th>Entregado</th><th>Pendiente</th><th>Entregar ahora</th></>}<th>Precio pactado</th><th>Subtotal {isDispatch?'entrega':''}</th></tr></thead><tbody>{data.items.map(i=><tr key={i.id}><td>{i.product_name_snapshot}{Number(i.serial_control)===1&&<small className="sub">Requiere series</small>}</td><td>{qtyFormat(i.quantity)} {i.sale_unit}</td>{isDispatch&&<><td>{qtyFormat(delivered[i.product_id]||0)}</td><td>{qtyFormat(pending[i.product_id]||0)}</td><td><input aria-label={'Cantidad a entregar de '+i.product_name_snapshot} type="number" min="0" max={pending[i.product_id]||0} step={i.sale_unit==='unidad'?'1':'0.001'} disabled={locked||!pending[i.product_id]} value={quantities[i.product_id]??'0'} onChange={e=>changeQty(i.product_id,e.target.value)}/></td></>}<td>{pesos(i.unit_price_clp)}</td><td>{pesos(isDispatch?dispatchSubtotal(i):i.subtotal_clp)}</td></tr>)}</tbody></table></div>
+      <div className="receipt-total"><span>{isDispatch?'Total de esta entrega':'Total acordado'}</span><strong>{pesos(dispatchTotal)}</strong></div><p className="helper">{isDispatch?'Puedes entregar una parte o todo el saldo. Solo se registra la venta de esta entrega, a precio pactado; el resto continúa reservado.':isReserve?'Precios y cantidades fijos. Se compromete stock libre sin cobro ni salida física.':'Precios y cantidades fijos; la venta completa requiere caja habilitada.'}</p>
     </section>
     {!isReserve&&warehouse>0&&serialLines.map(i=><SeriesPicker key={warehouse+'-'+i.product_id} item={i} warehouse={warehouse} request={request} value={series[i.product_id]||[]} onChange={v=>setSeries(old=>({...old,[i.product_id]:v}))} disabled={locked}/>)}
     <section className="panel pad formstack">
       {error&&<p role="alert" className="warning-box">{error}</p>}
       {confirmedSale?<><strong>{isReserve?'Reserva':'Venta'} #{confirmedSale} registrada.</strong><button type="button" className="primary" disabled={busy} onClick={onCheck}>Consultar cotización</button></>:<>
-      {!complete&&<p className="helper">{isReserve?'Revisa las cantidades: unidades enteras, hasta tres decimales para peso/volumen y máximo 500 equipos por línea serializada.':'Selecciona exactamente todas las series requeridas.'}</p>}
+      {!complete&&<p className="helper">{isReserve?'Revisa las cantidades: unidades enteras, hasta tres decimales para peso/volumen y máximo 500 equipos por línea serializada.':'Revisa las cantidades a entregar y selecciona exactamente las series requeridas.'}</p>}
       <button type="button" className="primary wide" disabled={busy||!complete||!warehouse||!data.quote.client_id} onClick={submit}>{busy?'Confirmando…':uncertain?'Reintentar la misma operación':isReserve?'Confirmar reserva':'Confirmar venta y descontar stock'}</button>
       {(uncertain||error)&&<button type="button" className="ghost" disabled={busy} onClick={onCheck}>Consultar estado de cotización</button>}
       <p className="helper">{isReserve?'La reserva conserva los precios acordados hasta despacho o cancelación. No genera venta, cobro ni DTE.':'La confirmación registra venta y caja, series y movimientos en una sola transacción. No emite DTE.'}</p></>}

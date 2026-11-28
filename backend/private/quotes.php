@@ -95,7 +95,14 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
         }
         $s=db()->prepare('SELECT r.id,r.status,r.warehouse_id,w.name AS warehouse_name,r.note,r.sale_id,r.created_at,r.closed_at,r.cancel_reason FROM serial_reservations r JOIN warehouses w ON w.id=r.warehouse_id AND w.business_id=r.business_id WHERE r.business_id=? AND r.quote_id=? ORDER BY r.id DESC LIMIT 1');
         $s->execute([$biz,$id]);$reservation=$s->fetch();$s->closeCursor();
-        return respond($response,['quote'=>quoteEffective($quote),'items'=>$items,'events'=>$events,'reservation'=>$reservation?:null]);
+        $dispatches=[];
+        if($reservation){
+            $s=db()->prepare('SELECT product_id,quantity,dispatched_quantity,(quantity-dispatched_quantity) AS remaining_quantity FROM serial_reservation_items WHERE business_id=? AND reservation_id=? ORDER BY product_id');
+            $s->execute([$biz,$reservation['id']]);$reservation['items']=$s->fetchAll();$s->closeCursor();
+        }
+        $s=db()->prepare('SELECT d.id,d.reservation_id,d.sale_id,d.total_clp,d.created_at,s.status AS sale_status FROM quote_dispatches d JOIN sales s ON s.id=d.sale_id AND s.business_id=d.business_id WHERE d.business_id=? AND d.quote_id=? ORDER BY d.id');
+        $s->execute([$biz,$id]);$dispatches=$s->fetchAll();$s->closeCursor();
+        return respond($response,['quote'=>quoteEffective($quote),'items'=>$items,'events'=>$events,'reservation'=>$reservation?:null,'dispatches'=>$dispatches]);
     });
     $group->post('/quotes',static function(Request $request,Response $response): Response {
         $admin=quoteCreationActor($request);
@@ -304,8 +311,11 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             titoSaleLocation($db,$a,(int)$wid,true,$request);
             $s=$db->prepare("UPDATE serial_reservations SET status='cancelled',closed_by=?,closed_at=UTC_TIMESTAMP(),cancel_reason=? WHERE business_id=? AND quote_id=? AND id=? AND status='pending'");
             $s->execute([$uid,$reason,$biz,$qid,$resId]);if($s->rowCount()!==1)fail('Reserva no disponible.',409);
-            $s=$db->prepare("UPDATE quotes SET status='accepted',revision=revision+1 WHERE business_id=? AND id=? AND status='reserved'");$s->execute([$biz,$qid]);if($s->rowCount()!==1)fail('Cotización cambió.',409);
-            quoteEvent($db,$biz,$qid,$uid,'reservation_cancelled','reserved','accepted',$reason,['reservation_id'=>$resId],$rid,$hash);
+            $s=$db->prepare('SELECT COALESCE(SUM(dispatched_quantity),0) FROM serial_reservation_items WHERE business_id=? AND reservation_id=?');$s->execute([$biz,$resId]);$partial=(float)$s->fetchColumn()>0;$s->closeCursor();
+            // Nunca volver a aceptar y reservar la cantidad original si ya hubo entregas.
+            $to=$partial?'partial_closed':'accepted';
+            $s=$db->prepare("UPDATE quotes SET status=?,revision=revision+1 WHERE business_id=? AND id=? AND status='reserved'");$s->execute([$to,$biz,$qid]);if($s->rowCount()!==1)fail('Cotización cambió.',409);
+            quoteEvent($db,$biz,$qid,$uid,'reservation_cancelled','reserved',$to,$reason,['reservation_id'=>$resId,'partial'=>$partial],$rid,$hash);
             $db->commit();return respond($response,['ok'=>true,'quote_id'=>$qid]);
         }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
     });
@@ -313,11 +323,28 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
     $group->post('/quotes/{id:[0-9]+}/convert',static function(Request $request,Response $response,array $args): Response {
         $admin=adminOnly($request);$biz=(int)$admin['business_id'];$uid=(int)$admin['id'];$qid=(int)$args['id'];
         $b=requestBody($request);
-        if(array_diff(array_keys($b),['payment_method','warehouse_id','serial_items','reservation_id']))fail('Campos inesperados.',422);
+        if(array_diff(array_keys($b),['payment_method','warehouse_id','serial_items','reservation_id','request_id','revision','dispatch_items']))fail('Campos inesperados.',422);
         $payment=$b['payment_method']??null;
         if(!in_array($payment,['efectivo','transferencia','tarjeta','otro'],true))fail('Medio de pago inválido.',422);
         $warehouse=originId($b['warehouse_id']??null,'warehouse_id');
         $resId=array_key_exists('reservation_id',$b)?reservationId($b['reservation_id']):null;
+        $dispatch=null;$dispatchRequest=null;$dispatchRevision=null;$dispatchHash=null;
+        if(array_key_exists('dispatch_items',$b)||array_key_exists('request_id',$b)||array_key_exists('revision',$b)){
+            if($resId===null)fail('El despacho parcial requiere reserva vinculada.',422);
+            [$dispatchRequest,$dispatchRevision,$dispatchHash]=quoteCommand($b);
+            $raw=$b['dispatch_items']??null;
+            if(!is_array($raw)||!array_is_list($raw)||count($raw)<1||count($raw)>50)fail('Selecciona productos a despachar.',422);
+            $dispatch=[];
+            foreach($raw as $line){
+                if(!is_array($line)||array_diff(array_keys($line),['product_id','quantity']))fail('Línea de despacho inválida.',422);
+                $pid=originId($line['product_id']??null,'product_id');
+                if(!$pid||isset($dispatch[$pid]))fail('Producto repetido o inválido.',422);
+                $qty=decimalQuantity($line['quantity']??null,false,true);
+                if((float)$qty<=0)fail('Cantidad de despacho inválida.',422);
+                $dispatch[$pid]=(float)$qty;
+            }
+            ksort($dispatch,SORT_NUMERIC);
+        }
         $selection=$b['serial_items']??[];
         if(!is_array($selection)||!array_is_list($selection)||count($selection)>50)fail('Selección de series inválida.',422);
         $series=[];
@@ -335,7 +362,16 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
         try{
             $db->beginTransaction();originLockCompany($db,$biz);
             $quote=quoteLock($db,$biz,$qid);
+            if($dispatch!==null){
+                $s=$db->prepare('SELECT quote_id,reservation_id,sale_id,actor_id,payload_hash,total_clp FROM quote_dispatches WHERE business_id=? AND request_id=?');
+                $s->execute([$biz,$dispatchRequest]);$old=$s->fetch();$s->closeCursor();
+                if($old){
+                    if((int)$old['quote_id']!==$qid||(int)$old['reservation_id']!==$resId||(int)$old['actor_id']!==$uid||!hash_equals((string)$old['payload_hash'],$dispatchHash))fail('Identificador de despacho reutilizado con otros datos.',409);
+                    $db->commit();return respond($response,['ok'=>true,'quote_id'=>$qid,'sale_id'=>(int)$old['sale_id'],'total_clp'=>(int)$old['total_clp'],'already_recorded'=>true]);
+                }
+            }
             if($quote['status']==='converted'){
+                if($dispatch!==null)fail('Cotización completamente despachada.',409);
                 $st=$db->prepare("SELECT payload_hash FROM quote_events WHERE business_id=? AND quote_id=? AND event_type='converted' ORDER BY id DESC LIMIT 1");
                 $st->execute([$biz,$qid]);$prior=$st->fetchColumn();$st->closeCursor();
                 if(($prior!==false&&$prior!==null&&!hash_equals((string)$prior,$conversionHash))||(($prior===false||$prior===null)&&($series||$resId!==null)))fail('La cotización ya fue convertida con otras condiciones. Consulta la venta #'.$quote['converted_sale_id'].'.',409);
@@ -343,13 +379,15 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             }
             $from=$resId===null?'accepted':'reserved';
             if($quote['status']!==$from)fail('Se requiere cotización aceptada o su reserva pendiente, según la operación.',409);
-            $reserved=[];
+            $reserved=[];$delivered=[];$remaining=[];$isFinal=true;
             if($resId!==null){
+                if($dispatch===null)fail('Actualiza la página para seleccionar las cantidades pendientes del despacho.',409);
+                if((int)$quote['revision']!==$dispatchRevision)fail('La reserva cambió. Recarga la cotización antes de despachar.',409);
                 $s=$db->prepare("SELECT warehouse_id,client_id FROM serial_reservations WHERE business_id=? AND quote_id=? AND id=? AND status='pending' FOR UPDATE");
                 $s->execute([$biz,$qid,$resId]);$r=$s->fetch();$s->closeCursor();
                 if(!$r||$warehouse!==(int)$r['warehouse_id']||(int)$r['client_id']!==(int)$quote['client_id'])fail('La reserva no corresponde a cotización, cliente o bodega.',409);
-                $s=$db->prepare('SELECT product_id,quantity FROM serial_reservation_items WHERE business_id=? AND reservation_id=? ORDER BY product_id FOR UPDATE');
-                $s->execute([$biz,$resId]);foreach($s->fetchAll() as $r)$reserved[(int)$r['product_id']]=(float)$r['quantity'];$s->closeCursor();
+                $s=$db->prepare('SELECT product_id,quantity,dispatched_quantity FROM serial_reservation_items WHERE business_id=? AND reservation_id=? ORDER BY product_id FOR UPDATE');
+                $s->execute([$biz,$resId]);foreach($s->fetchAll() as $r){$pid=(int)$r['product_id'];$reserved[$pid]=(float)$r['quantity'];$delivered[$pid]=(float)$r['dispatched_quantity'];$remaining[$pid]=round($reserved[$pid]-$delivered[$pid],3);if($remaining[$pid]<0)fail('Saldo de reserva inconsistente.',409);}$s->closeCursor();
                 if(!$reserved)fail('Reserva sin productos.',409);
             }
             if($quote['client_id']===null)fail('La cotización debe tener un cliente registrado.',422);
@@ -366,7 +404,25 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             // Los productos se bloquean en el orden de la cotización (product_id).
             // Se comprueba el conjunto de líneas completo antes de crear la venta.
             $stock=$db->prepare('SELECT id,name,stock_qty,price_clp,sale_unit FROM products WHERE id=? AND business_id=? AND is_active=1 FOR UPDATE');
-            if($resId!==null&&count($reserved)!==count($items))fail('La reserva no coincide con la cotización.',409);
+            if($resId!==null){
+                if(count($reserved)!==count($items)||array_diff_key($dispatch,$reserved))fail('La reserva no coincide con la cotización.',409);
+                $selectedItems=[];
+                foreach($items as $item){
+                    $pid=(int)$item['product_id'];$original=(float)$item['quantity'];$qty=$dispatch[$pid]??0.0;
+                    if(!isset($reserved[$pid])||abs($reserved[$pid]-$original)>0.00001||$qty>$remaining[$pid]+0.00001)fail('Cantidad superior al saldo reservado o reserva inconsistente.',409);
+                    if($remaining[$pid]-$qty>0.00001)$isFinal=false;
+                    if($qty<=0)continue;
+                    // Redondeo acumulado: la suma de entregas completas coincide con el subtotal pactado.
+                    $before=(int)round($delivered[$pid]*(int)$item['unit_price_clp'],0,PHP_ROUND_HALF_UP);
+                    $afterQty=round($delivered[$pid]+$qty,3);
+                    $after=abs($afterQty-$original)<0.00001?(int)$item['subtotal_clp']:(int)round($afterQty*(int)$item['unit_price_clp'],0,PHP_ROUND_HALF_UP);
+                    $item['quantity']=number_format($qty,3,'.','');$item['subtotal_clp']=$after-$before;
+                    if($item['subtotal_clp']<0)fail('Subtotal histórico inconsistente.',409);
+                    $selectedItems[]=$item;
+                }
+                if(!$selectedItems)fail('No hay cantidades pendientes seleccionadas.',422);
+                $items=$selectedItems;
+            }
             $controlledIds=[];
             foreach($items as $item){
                 $pid=(int)$item['product_id'];$qty=(float)$item['quantity'];
@@ -375,7 +431,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
                 if($p['sale_unit']!==$item['sale_unit'])fail('Un producto cambió de unidad. Revisa la cotización.',409);
                 if($qty<=0||(float)$p['stock_qty']+0.00001<$qty)fail('Stock total insuficiente para '.$p['name'],409);
                 $controlled=serialControlled($db,$biz,$pid);
-                if($resId!==null&&(!isset($reserved[$pid])||abs($reserved[$pid]-$qty)>0.00001))fail('Las cantidades o productos no coinciden con la reserva.',409);
+                if($p['sale_unit']==='unidad'&&floor($qty)!==$qty)fail('El producto requiere cantidades enteras.',422);
                 if($controlled){
                     $controlledIds[$pid]=true;
                     if($p['sale_unit']!=='unidad'||$qty!==(float)count($series[$pid]??[]))throw new HttpError('Selecciona exactamente una serie por unidad de '.$p['name'].'.',422,'serial_numbers');
@@ -384,7 +440,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
                 serialRequireFree($db,$biz,$pid,$saleLocation,$qty,$resId);
             }
             if(array_diff_key($series,$controlledIds))fail('Se enviaron series para productos no serializados o ajenos a la cotización.',422);
-            // Cotización numerada, una sola venta por conversión (bloqueo de su fila).
+            // Cada entrega registra una venta independiente; cotización y reserva están bloqueadas.
             $rid=sprintf('%08x-%04x-4%03x-%04x-%012x',random_int(0,0xffffffff),random_int(0,0xffff),random_int(0,0xfff),random_int(0x8000,0xbfff),random_int(0,0xffffffffffff));
             $st=$db->prepare('INSERT INTO sales(business_id,sold_by,request_id,payment_method,total_clp,warehouse_id,cash_session_id,client_id,client_name_snapshot,client_rut_snapshot,customer_mode) VALUES(?,?,?,?,0,?,?,?,?,?,?)');
             $st->execute([$biz,$uid,$rid,$payment,$saleLocation,$cashSessionId,$quote['client_id'],$quote['client_id']===null?null:$quote['customer_name'],$quote['customer_rut'],$quote['client_id']===null?null:'registered']);$sid=(int)$db->lastInsertId();
@@ -410,14 +466,22 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             }
             $st=$db->prepare('UPDATE sales SET total_clp=? WHERE id=? AND business_id=?');
             $st->execute([$total,$sid,$biz]);
-            $st=$db->prepare("UPDATE quotes SET status='converted',converted_sale_id=?,revision=revision+1 WHERE id=? AND business_id=? AND status=?");
-            $st->execute([$sid,$qid,$biz,$from]);
+            $to=$isFinal?'converted':'reserved';
+            // converted_sale_id conserva compatibilidad: última venta al completar; historial en quote_dispatches.
+            $st=$db->prepare("UPDATE quotes SET status=?,converted_sale_id=?,revision=revision+1 WHERE id=? AND business_id=? AND status=?");
+            $st->execute([$to,$isFinal?$sid:null,$qid,$biz,$from]);
             if($st->rowCount()!==1)throw new RuntimeException('No se pudo convertir la cotización.');
             titoCashRegisterSale($db,$biz,$uid,$cashSessionId,$sid,$rid,$total,$payment);
-            if($resId!==null)reservationComplete($db,$biz,$resId,$sid,$uid);
-            quoteEvent($db,$biz,$qid,$uid,'converted',$from,'converted',null,['sale_id'=>$sid,'reservation_id'=>$resId,'total_clp'=>$total,'warehouse_id'=>$saleLocation,'payment_method'=>$payment,'serial_items'=>$series],null,$conversionHash);
+            if($resId!==null){
+                $s=$db->prepare('UPDATE serial_reservation_items SET dispatched_quantity=dispatched_quantity+? WHERE business_id=? AND reservation_id=? AND product_id=? AND dispatched_quantity+?<=quantity');
+                foreach($items as $item){$s->execute([$item['quantity'],$biz,$resId,$item['product_id'],$item['quantity']]);if($s->rowCount()!==1)fail('Saldo de reserva cambió.',409);}
+                $s=$db->prepare('INSERT INTO quote_dispatches(business_id,quote_id,reservation_id,sale_id,actor_id,request_id,payload_hash,total_clp) VALUES(?,?,?,?,?,?,?,?)');
+                $s->execute([$biz,$qid,$resId,$sid,$uid,$dispatchRequest,$dispatchHash,$total]);
+                if($isFinal)reservationComplete($db,$biz,$resId,$sid,$uid);
+            }
+            quoteEvent($db,$biz,$qid,$uid,$isFinal?'converted':'partial_dispatch',$from,$to,null,['sale_id'=>$sid,'reservation_id'=>$resId,'total_clp'=>$total,'warehouse_id'=>$saleLocation,'payment_method'=>$payment,'serial_items'=>$series,'items'=>array_map(static fn($i)=>['product_id'=>$i['product_id'],'quantity'=>$i['quantity'],'subtotal_clp'=>$i['subtotal_clp']],$items)],$dispatchRequest,$dispatchHash??$conversionHash);
             $db->commit();
-            return respond($response,['ok'=>true,'quote_id'=>$qid,'sale_id'=>$sid,'total_clp'=>$total,'warehouse_id'=>$saleLocation],201);
+            return respond($response,['ok'=>true,'quote_id'=>$qid,'sale_id'=>$sid,'total_clp'=>$total,'warehouse_id'=>$saleLocation,'complete'=>$isFinal],201);
         }catch(Throwable $e){
             if($db->inTransaction())$db->rollBack();
             throw $e;

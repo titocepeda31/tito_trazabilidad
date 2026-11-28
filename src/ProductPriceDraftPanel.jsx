@@ -12,8 +12,8 @@ function normalizeRow(r){
  const tax=String(r.tax_treatment??'').trim().toLowerCase();
  return {product_name:String(r.product_name??'').trim(),sku:String(r.sku??'').trim()||null,barcode:String(r.barcode??'').trim()||null,price_unit:unit,source_amount:unit==='UF'?raw.replace(',','.'):raw,source_basis:({neto:'net',final:'gross',bruto:'gross'})[basis]||basis,tax_treatment:({afecto:'vat19',exento:'exempt','no afecto':'non_taxable'})[tax]||tax};
 }
-export default function ProductPriceDraftPanel({request,today,defaultUnit='CLP'}){
- const [form,setForm]=useState({...initial,price_unit:defaultUnit}),[mode,setMode]=useState('manual'),[rows,setRows]=useState([]),[date,setDate]=useState(''),[review,setReview]=useState(null),[history,setHistory]=useState([]),[busy,setBusy]=useState(false),[error,setError]=useState(''),[message,setMessage]=useState('');
+export default function ProductPriceDraftPanel({request,today,defaultUnit='CLP',fixedMode=null}){
+ const [form,setForm]=useState({...initial,price_unit:defaultUnit}),[mode,setMode]=useState(fixedMode||'manual'),[rows,setRows]=useState([]),[date,setDate]=useState(''),[review,setReview]=useState(null),[history,setHistory]=useState([]),[busy,setBusy]=useState(false),[error,setError]=useState(''),[message,setMessage]=useState('');
  async function loadHistory(){const r=await request('/currency/product-drafts');setHistory(r.drafts||[]);}
  useEffect(()=>{loadHistory().catch(e=>setError(e.message));},[]);
  const change=(key,val)=>{setForm(f=>({...f,[key]:val}));setReview(null);};
@@ -40,7 +40,7 @@ export default function ProductPriceDraftPanel({request,today,defaultUnit='CLP'}
  const table=(data)=><div className="table-wrap"><table><thead><tr><th>Producto / código</th><th>Original</th><th>Base / impuesto</th><th>Final</th><th>CLP referencial</th><th>Catálogo</th></tr></thead><tbody>{data.map((r,i)=><tr key={r.id??i}><td>{r.product_name}<small className="sub">{r.sku||r.barcode}</small></td><td>{r.source_amount} {r.price_unit}</td><td>{r.source_basis==='net'?'Neto':'Final'} · {({vat19:'IVA 19%',exempt:'Exento',non_taxable:'No afecto'})[r.tax_treatment]}</td><td>{r.final_amount} {r.price_unit}</td><td>{r.reference_clp==null?'Sin conversión':pesos(Number(r.reference_clp))}{r.reference_date&&<small className="sub">{r.reference_date} · UF #{r.uf_rate_id}</small>}</td><td>{r.product_id?'Existente #'+r.product_id:'Nuevo (borrador)'}</td></tr>)}</tbody></table></div>;
  return <><section className="panel pad"><h3>Preparación de precios de productos</h3><p className="warning-box">Borradores únicamente. No se crean productos vendibles ni se actualizan sus precios o existencias. UF operativa queda bloqueada hasta integrar ventas y cotizaciones.</p>
  {error&&<p role="alert">{error}</p>}{message&&<p role="status">{message}</p>}
- <div className="inline-actions"><button type="button" className="ghost" disabled={busy} onClick={()=>{setMode('manual');setReview(null);}}>Ingreso manual</button><button type="button" className="ghost" disabled={busy} onClick={()=>{setMode('file');setReview(null);}}>Excel / CSV</button></div>
+ {!fixedMode&&<div className="inline-actions"><button type="button" className="ghost" disabled={busy} onClick={()=>{setMode('manual');setReview(null);}}>Ingreso manual</button><button type="button" className="ghost" disabled={busy} onClick={()=>{setMode('file');setReview(null);}}>Excel / CSV</button></div>}
  <form className="formstack" onSubmit={preview}>
  {mode==='manual'?<><label>Producto<input required maxLength={120} value={form.product_name} disabled={busy} onChange={e=>change('product_name',e.target.value)}/></label>
  <div className="field-row"><label>SKU<input maxLength={50} value={form.sku} disabled={busy} onChange={e=>change('sku',e.target.value)}/></label><label>Código de barras<input maxLength={50} value={form.barcode} disabled={busy} onChange={e=>change('barcode',e.target.value)}/></label></div>
@@ -52,4 +52,14 @@ export default function ProductPriceDraftPanel({request,today,defaultUnit='CLP'}
  <button className="primary" disabled={busy||(mode==='file'&&!rows.length)}>Revisar precios</button></form>
  {review&&<><h4>Vista previa del servidor</h4>{table(review.expected)}<button type="button" className="primary" disabled={busy} onClick={save}>Confirmar / guardar borradores</button><p className="helper">Si falla la comunicación, reintenta el mismo guardado antes de editar el lote.</p></>}
  </section><section className="panel pad"><h3>Últimos borradores</h3>{history.length?table(history):<p className="muted">Sin borradores registrados.</p>}</section></>;
+}
+
+export function ProductPriceDraftEntry({request,mode}){
+ const [open,setOpen]=useState(false),[settings,setSettings]=useState(null),[error,setError]=useState('');
+ useEffect(()=>{if(!open)return;let active=true;setError('');setSettings(null);request('/currency/settings').then(r=>{if(active)setSettings(r);}).catch(e=>{if(active)setError(e.message);});return()=>{active=false;};},[open,request]);
+ return <section className="panel pad" style={{marginBottom:16}}>
+ <div className="inline-actions"><button type="button" className="ghost" aria-expanded={open} onClick={()=>setOpen(v=>!v)}>{open?'Cerrar preparación de precios':mode==='file'?'Preparar planilla de precios CLP / UF':'Preparar precio CLP / UF'}</button></div>
+ <p className="helper">Solo borradores; aún no modifica los precios activos ni las existencias.</p>
+ {open&&(error?<p role="alert">{error}</p>:settings?<ProductPriceDraftPanel request={request} today={settings.today} defaultUnit={settings.settings.default_unit} fixedMode={mode}/>:<p role="status">Cargando configuración comercial…</p>)}
+ </section>;
 }

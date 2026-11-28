@@ -16,6 +16,7 @@ function quoteToday(): string {
 }
 function quoteEffective(array $q): array {
     $q['effective_status']=in_array($q['status'],['sent','accepted'],true)&&$q['valid_until']<quoteToday()?'expired':$q['status'];
+    if($q['status']==='reserved'&&reservationExpired($q['reservation_expires_on']??null))$q['effective_status']='reservation_expired';
     return $q;
 }
 function quoteEvent(PDO $db,int $biz,int $qid,int $uid,string $type,?string $from,string $to,?string $note=null,?array $details=null,?string $rid=null,?string $hash=null): void {
@@ -75,7 +76,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
     });
     $group->get('/quotes',static function(Request $request,Response $response): Response {
         $admin=accessRequire($request,'quotes.view');
-        $st=db()->prepare('SELECT id,client_id,customer_name,customer_rut,customer_contact,valid_until,status,revision,total_clp,created_at,converted_sale_id FROM quotes WHERE business_id=? ORDER BY id DESC LIMIT 100');
+        $st=db()->prepare('SELECT q.id,q.client_id,q.customer_name,q.customer_rut,q.customer_contact,q.valid_until,q.status,q.revision,q.total_clp,q.created_at,q.converted_sale_id,(SELECT r.expires_on FROM serial_reservations r WHERE r.business_id=q.business_id AND r.quote_id=q.id AND r.status=\'pending\' ORDER BY r.id DESC LIMIT 1) AS reservation_expires_on FROM quotes q WHERE q.business_id=? ORDER BY q.id DESC LIMIT 100');
         $st->execute([(int)$admin['business_id']]);
         return respond($response,['quotes'=>array_map('quoteEffective',$st->fetchAll())]);
     });
@@ -93,10 +94,12 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             $st->execute([$biz,$id]);$events=$st->fetchAll();
             foreach($events as &$event){$event['details']=$event['details_json']===null?null:json_decode($event['details_json'],true,512,JSON_THROW_ON_ERROR);unset($event['details_json']);}unset($event);
         }
-        $s=db()->prepare('SELECT r.id,r.status,r.warehouse_id,w.name AS warehouse_name,r.note,r.sale_id,r.created_at,r.closed_at,r.cancel_reason FROM serial_reservations r JOIN warehouses w ON w.id=r.warehouse_id AND w.business_id=r.business_id WHERE r.business_id=? AND r.quote_id=? ORDER BY r.id DESC LIMIT 1');
+        $s=db()->prepare('SELECT r.id,r.status,r.warehouse_id,w.name AS warehouse_name,r.note,r.sale_id,r.created_at,r.closed_at,r.cancel_reason,r.expires_on FROM serial_reservations r JOIN warehouses w ON w.id=r.warehouse_id AND w.business_id=r.business_id WHERE r.business_id=? AND r.quote_id=? ORDER BY r.id DESC LIMIT 1');
         $s->execute([$biz,$id]);$reservation=$s->fetch();$s->closeCursor();
         $dispatches=[];
         if($reservation){
+            $reservation=reservationEffective($reservation);
+            $quote['reservation_expires_on']=$reservation['expires_on'];
             $s=db()->prepare('SELECT product_id,quantity,dispatched_quantity,(quantity-dispatched_quantity) AS remaining_quantity FROM serial_reservation_items WHERE business_id=? AND reservation_id=? ORDER BY product_id');
             $s->execute([$biz,$reservation['id']]);$reservation['items']=$s->fetchAll();$s->closeCursor();
         }
@@ -259,7 +262,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
     // Reserva completa de cotización normal, serializada o mixta. Sin caja, salida física ni selección de series.
     $group->post('/quotes/{id:[0-9]+}/reserve',static function(Request $request,Response $response,array $args): Response {
         $a=adminOnly($request);$biz=(int)$a['business_id'];$uid=(int)$a['id'];$qid=(int)$args['id'];$b=requestBody($request);
-        if(array_diff(array_keys($b),['request_id','revision','warehouse_id','note']))fail('Campos no permitidos.',422);
+        if(array_diff(array_keys($b),['request_id','revision','warehouse_id','note','expires_on']))fail('Campos no permitidos.',422);
         [$rid,$revision,$hash]=quoteCommand($b);
         $wid=originId($b['warehouse_id']??null,'warehouse_id');if($wid===null)fail('Selecciona bodega.',422);
         $note=$b['note']??'';if(!is_string($note)||mb_strlen(trim($note))>250)fail('Observación inválida.',422);$note=trim($note);
@@ -271,6 +274,8 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
                 $db->commit();return respond($response,['ok'=>true,'reservation_id'=>(int)$existing,'quote_id'=>$qid,'already_recorded'=>true]);
             }
             if($q['status']!=='accepted'||(int)$q['revision']!==$revision||$q['valid_until']<quoteToday())fail('Se requiere cotización aceptada y vigente. Recarga su estado.',409);
+            $expiry=reservationDate($b['expires_on']??$q['valid_until']);
+            if(reservationExpired($expiry))fail('La fecha límite no puede ser anterior a hoy.',422);
             if($q['client_id']===null)fail('Selecciona un cliente registrado.',422);
             $s=$db->prepare('SELECT id FROM habitual_clients WHERE business_id=? AND id=? AND is_active=1 FOR UPDATE');$s->execute([$biz,(int)$q['client_id']]);$active=$s->fetchColumn();$s->closeCursor();if(!$active)fail('Cliente inactivo.',409);
             $wid=titoSaleLocation($db,$a,$wid,true,$request);
@@ -288,12 +293,12 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
                 }
                 serialRequireFree($db,$biz,$pid,$wid,$qty);
             }
-            $s=$db->prepare('INSERT INTO serial_reservations(business_id,warehouse_id,client_id,client_name,created_by,request_id,payload_hash,note,quote_id) VALUES(?,?,?,?,?,?,?,?,?)');
-            $s->execute([$biz,$wid,$q['client_id'],$q['customer_name'],$uid,$rid,$hash,$note,$qid]);$resId=(int)$db->lastInsertId();
+            $s=$db->prepare('INSERT INTO serial_reservations(business_id,warehouse_id,client_id,client_name,created_by,request_id,payload_hash,note,quote_id,expires_on) VALUES(?,?,?,?,?,?,?,?,?,?)');
+            $s->execute([$biz,$wid,$q['client_id'],$q['customer_name'],$uid,$rid,$hash,$note,$qid,$expiry]);$resId=(int)$db->lastInsertId();
             $s=$db->prepare('INSERT INTO serial_reservation_items(reservation_id,business_id,product_id,quantity) VALUES(?,?,?,?)');
             foreach($items as $i)$s->execute([$resId,$biz,(int)$i['product_id'],$i['quantity']]);
             $s=$db->prepare("UPDATE quotes SET status='reserved',revision=revision+1 WHERE business_id=? AND id=? AND status='accepted'");$s->execute([$biz,$qid]);if($s->rowCount()!==1)fail('La cotización cambió.',409);
-            quoteEvent($db,$biz,$qid,$uid,'reserved','accepted','reserved',$note?:null,['reservation_id'=>$resId,'warehouse_id'=>$wid,'total_clp'=>(int)$q['total_clp']],$rid,$hash);
+            quoteEvent($db,$biz,$qid,$uid,'reserved','accepted','reserved',$note?:null,['reservation_id'=>$resId,'warehouse_id'=>$wid,'total_clp'=>(int)$q['total_clp'],'expires_on'=>$expiry],$rid,$hash);
             $db->commit();return respond($response,['ok'=>true,'quote_id'=>$qid,'reservation_id'=>$resId],201);
         }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
     });
@@ -306,17 +311,39 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             originLockCompany($db,$biz);$q=quoteLock($db,$biz,$qid);
             if(quoteReplay($db,$biz,$qid,$uid,$rid,$hash)){$db->commit();return respond($response,['ok'=>true,'quote_id'=>$qid,'already_recorded'=>true]);}
             if($q['status']!=='reserved'||(int)$q['revision']!==$revision)fail('La cotización cambió o ya no tiene reserva pendiente.',409);
-            $s=$db->prepare("SELECT warehouse_id FROM serial_reservations WHERE business_id=? AND quote_id=? AND id=? AND status='pending' FOR UPDATE");
-            $s->execute([$biz,$qid,$resId]);$wid=$s->fetchColumn();$s->closeCursor();if(!$wid)fail('Reserva no disponible.',409);
-            titoSaleLocation($db,$a,(int)$wid,true,$request);
-            $s=$db->prepare("UPDATE serial_reservations SET status='cancelled',closed_by=?,closed_at=UTC_TIMESTAMP(),cancel_reason=? WHERE business_id=? AND quote_id=? AND id=? AND status='pending'");
-            $s->execute([$uid,$reason,$biz,$qid,$resId]);if($s->rowCount()!==1)fail('Reserva no disponible.',409);
+            $s=$db->prepare("SELECT warehouse_id,expires_on FROM serial_reservations WHERE business_id=? AND quote_id=? AND id=? AND status='pending' FOR UPDATE");
+            $s->execute([$biz,$qid,$resId]);$reservation=$s->fetch();$s->closeCursor();if(!$reservation)fail('Reserva no disponible.',409);
+            titoSaleLocation($db,$a,(int)$reservation['warehouse_id'],true,$request);
+            $expired=reservationExpired($reservation['expires_on']);$resStatus=$expired?'expired':'cancelled';
+            $s=$db->prepare("UPDATE serial_reservations SET status=?,closed_by=?,closed_at=UTC_TIMESTAMP(),cancel_reason=? WHERE business_id=? AND quote_id=? AND id=? AND status='pending'");
+            $s->execute([$resStatus,$uid,$reason,$biz,$qid,$resId]);if($s->rowCount()!==1)fail('Reserva no disponible.',409);
             $s=$db->prepare('SELECT COALESCE(SUM(dispatched_quantity),0) FROM serial_reservation_items WHERE business_id=? AND reservation_id=?');$s->execute([$biz,$resId]);$partial=(float)$s->fetchColumn()>0;$s->closeCursor();
             // Nunca volver a aceptar y reservar la cantidad original si ya hubo entregas.
-            $to=$partial?'partial_closed':'accepted';
+            $to=$partial?'partial_closed':($expired?'reservation_expired':'accepted');
             $s=$db->prepare("UPDATE quotes SET status=?,revision=revision+1 WHERE business_id=? AND id=? AND status='reserved'");$s->execute([$to,$biz,$qid]);if($s->rowCount()!==1)fail('Cotización cambió.',409);
-            quoteEvent($db,$biz,$qid,$uid,'reservation_cancelled','reserved',$to,$reason,['reservation_id'=>$resId,'partial'=>$partial],$rid,$hash);
+            quoteEvent($db,$biz,$qid,$uid,$expired?'reservation_expired':'reservation_cancelled','reserved',$to,$reason,['reservation_id'=>$resId,'partial'=>$partial,'expires_on'=>$reservation['expires_on']],$rid,$hash);
             $db->commit();return respond($response,['ok'=>true,'quote_id'=>$qid]);
+        }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
+    });
+    // Cambiar fecha de una reserva vigente (o histórica sin fecha); jamás reactivar una vencida.
+    $group->post('/quotes/{id:[0-9]+}/reservation-expiry',static function(Request $request,Response $response,array $args): Response {
+        $a=adminOnly($request);$biz=(int)$a['business_id'];$uid=(int)$a['id'];$qid=(int)$args['id'];$b=requestBody($request);
+        if(array_diff(array_keys($b),['request_id','revision','reservation_id','expires_on','reason']))fail('Campos no permitidos.',422);
+        [$rid,$revision,$hash]=quoteCommand($b);$resId=reservationId($b['reservation_id']??null);$expiry=reservationDate($b['expires_on']??null);$reason=requireString($b,'reason',250);if(mb_strlen($reason)<3)fail('Indica motivo.',422);
+        $db=db();$db->beginTransaction();
+        try{
+            originLockCompany($db,$biz);$q=quoteLock($db,$biz,$qid);
+            if(quoteReplay($db,$biz,$qid,$uid,$rid,$hash)){$db->commit();return respond($response,['ok'=>true,'already_recorded'=>true]);}
+            if($q['status']!=='reserved'||(int)$q['revision']!==$revision)fail('La cotización cambió.',409);
+            $s=$db->prepare("SELECT warehouse_id,expires_on FROM serial_reservations WHERE business_id=? AND quote_id=? AND id=? AND status='pending' FOR UPDATE");
+            $s->execute([$biz,$qid,$resId]);$r=$s->fetch();$s->closeCursor();
+            if(!$r||reservationExpired($r['expires_on'])||reservationExpired($expiry))fail('Reserva vencida o fecha límite inválida. No se puede reactivar stock liberado.',409);
+            titoSaleLocation($db,$a,(int)$r['warehouse_id'],true,$request);
+            if($r['expires_on']===$expiry)fail('La fecha no cambió.',422);
+            $s=$db->prepare('UPDATE serial_reservations SET expires_on=? WHERE business_id=? AND id=?');$s->execute([$expiry,$biz,$resId]);
+            $s=$db->prepare("UPDATE quotes SET revision=revision+1 WHERE business_id=? AND id=? AND status='reserved'");$s->execute([$biz,$qid]);
+            quoteEvent($db,$biz,$qid,$uid,'reservation_expiry_changed','reserved','reserved',$reason,['reservation_id'=>$resId,'before'=>$r['expires_on'],'after'=>$expiry],$rid,$hash);
+            $db->commit();return respond($response,['ok'=>true]);
         }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
     });
     // Conversión sólo administrador: una venta por cotización aceptada, con precios históricos y series cuando corresponda.
@@ -383,9 +410,10 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             if($resId!==null){
                 if($dispatch===null)fail('Actualiza la página para seleccionar las cantidades pendientes del despacho.',409);
                 if((int)$quote['revision']!==$dispatchRevision)fail('La reserva cambió. Recarga la cotización antes de despachar.',409);
-                $s=$db->prepare("SELECT warehouse_id,client_id FROM serial_reservations WHERE business_id=? AND quote_id=? AND id=? AND status='pending' FOR UPDATE");
+                $s=$db->prepare("SELECT warehouse_id,client_id,expires_on FROM serial_reservations WHERE business_id=? AND quote_id=? AND id=? AND status='pending' FOR UPDATE");
                 $s->execute([$biz,$qid,$resId]);$r=$s->fetch();$s->closeCursor();
                 if(!$r||$warehouse!==(int)$r['warehouse_id']||(int)$r['client_id']!==(int)$quote['client_id'])fail('La reserva no corresponde a cotización, cliente o bodega.',409);
+                if(reservationExpired($r['expires_on']))fail('Reserva vencida. Su saldo fue liberado; no se puede despachar.',409);
                 $s=$db->prepare('SELECT product_id,quantity,dispatched_quantity FROM serial_reservation_items WHERE business_id=? AND reservation_id=? ORDER BY product_id FOR UPDATE');
                 $s->execute([$biz,$resId]);foreach($s->fetchAll() as $r){$pid=(int)$r['product_id'];$reserved[$pid]=(float)$r['quantity'];$delivered[$pid]=(float)$r['dispatched_quantity'];$remaining[$pid]=round($reserved[$pid]-$delivered[$pid],3);if($remaining[$pid]<0)fail('Saldo de reserva inconsistente.',409);}$s->closeCursor();
                 if(!$reserved)fail('Reserva sin productos.',409);
@@ -394,7 +422,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             if($quote['client_id']!==null){
                 $st=$db->prepare('SELECT id FROM habitual_clients WHERE business_id=? AND id=? AND is_active=1 FOR UPDATE');$st->execute([$biz,(int)$quote['client_id']]);$found=$st->fetchColumn();$st->closeCursor();if(!$found)fail('El cliente de la cotización ya no está activo.',409);
             }
-            // Reserva confirmada durante vigencia conserva acuerdo hasta despacho o cancelación explícita.
+            // Reserva confirmada durante vigencia conserva acuerdo hasta su propio vencimiento o cierre.
             if($resId===null&&$quote['valid_until']<quoteToday())fail('La cotización está vencida. Crea una nueva.',409);
             $st=$db->prepare('SELECT product_id,product_name_snapshot,sale_unit,quantity,list_price_clp,unit_price_clp,discount_reason,subtotal_clp FROM quote_items WHERE quote_id=? ORDER BY product_id');
             $st->execute([$qid]);$items=$st->fetchAll();$st->closeCursor();

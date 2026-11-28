@@ -434,7 +434,7 @@ function registerWarehouseRoutes(RouteCollectorProxy $group): void {
             }
         }
         if($indexes){
-            $r=db()->prepare("SELECT i.product_id,r.warehouse_id,SUM(i.quantity-i.dispatched_quantity) AS qty FROM serial_reservation_items i JOIN serial_reservations r ON r.id=i.reservation_id AND r.business_id=i.business_id WHERE i.business_id=? AND r.status='pending' GROUP BY i.product_id,r.warehouse_id");$r->execute([$biz]);
+            $r=db()->prepare("SELECT i.product_id,r.warehouse_id,SUM(i.quantity-i.dispatched_quantity) AS qty FROM serial_reservation_items i JOIN serial_reservations r ON r.id=i.reservation_id AND r.business_id=i.business_id WHERE i.business_id=? AND r.status='pending' AND (r.expires_on IS NULL OR r.expires_on>=?) GROUP BY i.product_id,r.warehouse_id");$r->execute([$biz,reservationToday()]);
             foreach($r->fetchAll() as $row)if(isset($indexes[(int)$row['product_id']]))$stocks[$indexes[(int)$row['product_id']]]['reserved_locations'][(string)$row['warehouse_id']]=(float)$row['qty'];
         }
         return respond($response,['stocks'=>$stocks]);

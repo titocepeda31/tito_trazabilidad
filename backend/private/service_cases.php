@@ -21,7 +21,7 @@ function registerServiceRoutes(RouteCollectorProxy $group): void {
         $a=adminOnly($request);$biz=(int)$a['business_id'];$q=$request->getQueryParams()['q']??'';
         if(!is_string($q)||mb_strlen($q)>120||mb_strlen(trim($q))<2)fail('Ingresa al menos dos caracteres de la serie.',422);
         $s=db()->prepare("SELECT su.unit_id,su.sale_id,x.serial_number,x.status AS unit_status,p.name AS product_name,ss.client_id,ss.client_name,DATE(s.created_at) AS sale_date,m.name AS manufacturer_name,w.id AS warranty_id,w.starts_on,w.ends_on,w.terms,w.manufacturer_name AS warranty_manufacturer FROM serial_sale_units su JOIN serial_units x ON x.id=su.unit_id AND x.business_id=su.business_id JOIN serial_sale_snapshots ss ON ss.sale_id=su.sale_id AND ss.business_id=su.business_id JOIN sales s ON s.id=su.sale_id AND s.business_id=su.business_id JOIN products p ON p.id=x.product_id AND p.business_id=x.business_id LEFT JOIN product_origins po ON po.product_id=p.id AND po.business_id=p.business_id LEFT JOIN manufacturers m ON m.id=po.manufacturer_id AND m.business_id=p.business_id LEFT JOIN unit_warranties w ON w.unit_id=su.unit_id AND w.sale_id=su.sale_id AND w.business_id=su.business_id WHERE su.business_id=? AND LOCATE(?,x.serial_number)>0 AND s.status='completed' AND x.status IN ('sold','warranty_hold') AND NOT EXISTS(SELECT 1 FROM serial_sale_units later WHERE later.unit_id=su.unit_id AND later.sale_id>su.sale_id) ORDER BY x.serial_number,su.unit_id LIMIT 51");
-        $s->execute([$biz,mb_strtoupper(trim($q),'UTF-8')]);$rows=$s->fetchAll();$s->closeCursor();return respond($response,['rows'=>array_slice($rows,0,50),'more'=>count($rows)>50,'today'=>quoteToday()]);
+        $s->execute([$biz,mb_strtoupper(trim($q),'UTF-8')]);$rows=$s->fetchAll();$s->closeCursor();$rows=array_slice($rows,0,51);foreach(array_slice($rows,0,50) as $k=>$row)$rows[$k]['coverages']=warrantyForUnit(db(),$biz,(int)$row['sale_id'],(int)$row['unit_id']);return respond($response,['rows'=>array_slice($rows,0,50),'more'=>count($rows)>50,'today'=>quoteToday()]);
     });
     $group->post('/service/warranties',static function(Request $request,Response $response): Response {
         $a=adminOnly($request);$biz=(int)$a['business_id'];$uid=(int)$a['id'];$b=requestBody($request);
@@ -33,7 +33,8 @@ function registerServiceRoutes(RouteCollectorProxy $group): void {
             originLockCompany($db,$biz);$sold=serviceSold($db,$biz,$unit,$sale);
             $s=$db->prepare('SELECT id,manufacturer_name,starts_on,ends_on,terms,evidence_reference FROM unit_warranties WHERE business_id=? AND unit_id=? AND sale_id=? FOR UPDATE');$s->execute([$biz,$unit,$sale]);$old=$s->fetch();$s->closeCursor();
             if($old){if([$old['manufacturer_name'],$old['starts_on'],$old['ends_on'],$old['terms'],$old['evidence_reference']]!==[$manufacturer,$start,$end,$terms,$ref])fail('Ya existe una garantía registrada. No se sobrescriben condiciones históricas.',409);$db->commit();return respond($response,['ok'=>true,'warranty_id'=>(int)$old['id'],'already_recorded'=>true]);}
-            $s=$db->prepare('INSERT INTO unit_warranties(business_id,sale_id,unit_id,client_id,manufacturer_name,starts_on,ends_on,terms,evidence_reference,created_by) VALUES(?,?,?,?,?,?,?,?,?,?)');$s->execute([$biz,$sale,$unit,$sold['client_id'],$manufacturer,$start,$end,$terms,$ref,$uid]);$id=(int)$db->lastInsertId();$db->commit();return respond($response,['ok'=>true,'warranty_id'=>$id],201);
+            fail('Registra coberturas en el módulo Garantías; las garantías anteriores se conservan.',409);
+
         }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
     });
     $group->get('/service/cases',static function(Request $request,Response $response): Response {

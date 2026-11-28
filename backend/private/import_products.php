@@ -11,6 +11,8 @@ function importProducts(PDO $db,int $businessId,int $userId,array $input): array
     // La interfaz multisucursal nueva siempre envía un ID explícito.
     $warehouseId=$input['warehouse_id']??null;
     if($warehouseId!==null&&(!is_int($warehouseId)||$warehouseId<1))fail('Ubicación de inventario inválida.',422);
+    $taxMode=$input['price_import_version']??null;
+    if($taxMode!==null&&$taxMode!==1)fail('Configuración de precios inválida.',422);
     $rows=$input['rows']??null;
     if(!is_string($importId)||!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i',$importId))fail('Identificador de importación inválido.',422);
     if(!is_int($chunk)||$chunk<0||$chunk>100)fail('Número de lote inválido.',422);
@@ -41,13 +43,20 @@ function importProducts(PDO $db,int $businessId,int $userId,array $input): array
             $seenBarcodes[$key]=true;
         }
         $name=requireString($r,'name',120);
-        $price=integerPrice($r['price_clp']??null);
+        $price=integerPrice($r['price_clp']??null);$source=$price;$basis=null;$treatment=null;
+        if($taxMode===1){
+            $basis=$r['source_price_basis']??null;$treatment=$r['tax_treatment']??null;
+            if(!in_array($basis,['gross','net'],true)||!in_array($treatment,['vat19','exempt','non_taxable'],true))fail('Confirma si el precio incluye IVA y el tratamiento de cada producto.',422);
+            if($basis==='net'&&$treatment==='vat19')$price=integerPrice($source+intdiv($source*19+50,100));
+        }
         $unit=$r['sale_unit']??'unidad';
         if(!in_array($unit,['unidad','kg','litro'],true))fail('Unidad inválida en fila '.($index+1).'.',422);
         $stockRaw=$r['stock_qty']??null;
         if($mode!=='preserve_existing'&&$stockRaw===null)fail('Falta stock en fila '.($index+1).'.',422);
         $stock=$stockRaw===null?null:decimalQuantity($stockRaw,false,$unit!=='unidad');
-        $validated[]=['sku'=>$sku,'barcode'=>$barcode,'name'=>$name,'price'=>$price,'unit'=>$unit,'stock'=>$stock];
+        $entry=['sku'=>$sku,'barcode'=>$barcode,'name'=>$name,'price'=>$price,'unit'=>$unit,'stock'=>$stock];
+        if($taxMode===1)$entry+=['source_price'=>$source,'source_basis'=>$basis,'tax_treatment'=>$treatment];
+        $validated[]=$entry;
     }
     // Nuevos lotes ligan la sucursal a la huella. Sin warehouse_id conservamos
     // la huella histórica para permitir reintentos idempotentes del cliente anterior.
@@ -55,6 +64,7 @@ function importProducts(PDO $db,int $businessId,int $userId,array $input): array
         ?['mode'=>$mode,'rows'=>$validated]
         :['mode'=>$mode,'warehouse_id'=>$warehouseId,'rows'=>$validated];
     if($autoSku)$hashData['generate_missing_sku']=true;
+    if($taxMode===1)$hashData['price_import_version']=1;
     $payloadHash=hash('sha256',json_encode($hashData,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
     $prior=$db->prepare('SELECT payload_hash,result_json FROM product_import_chunks WHERE business_id=? AND import_id=? AND chunk_index=?');
     $summary=['created'=>0,'updated'=>0,'unchanged'=>0,'stock_adjusted'=>0];
@@ -67,6 +77,24 @@ function importProducts(PDO $db,int $businessId,int $userId,array $input): array
     };
     try{
         $db->beginTransaction();originLockCompany($db,$businessId);
+        // Replays must return the original result even if the current fiscal configuration has changed.
+        $prior->execute([$businessId,$importId,$chunk]);$recorded=$prior->fetchColumn();$prior->closeCursor();
+        if($recorded!==false){$result=$respondPrior();$db->commit();return $result;}
+        if($taxMode===null){
+            $legacy=$db->prepare('SELECT 1 FROM product_import_chunks WHERE business_id=? AND import_id=? LIMIT 1');$legacy->execute([$businessId,$importId]);$started=$legacy->fetchColumn();$legacy->closeCursor();
+            if(!$started)fail('Actualiza el importador y confirma si los precios incluyen IVA antes de iniciar una carga nueva.',422);
+        }else{
+            $cfg=dteConfig($db,$businessId);if($cfg&&$cfg['price_basis']==='net')fail('La empresa está configurada con precios netos. Revisa la configuración tributaria y los precios existentes antes de cargar precios finales. No se modificó este lote.',409);
+        }
+        $taxDay=$taxMode===1?quoteToday():null;$priceAudit=[];
+        $taxWrite=static function(int $pid,array $r)use($db,$businessId,$userId,$importId,$chunk,$taxDay,$payloadHash,$taxMode):void{
+            if($taxMode!==1)return;
+            $current=dteTaxPolicy($db,$businessId,$pid,$taxDay);
+            if($current&&$current['treatment']!=='unknown'&&$current['treatment']!==$r['tax_treatment'])fail('El impuesto del producto '.$r['name'].' no coincide con su clasificación vigente. Revísalo en Documentos tributarios → Impuestos por producto. No se guardó el lote.',409);
+            if($current&&$current['treatment']===$r['tax_treatment'])return;
+            $s=$db->prepare('INSERT INTO product_tax_versions(business_id,product_id,treatment,effective_on,evidence_reference,actor_id,request_id,payload_hash) VALUES(?,?,?,?,?,?,?,?)');
+            $s->execute([$businessId,$pid,$r['tax_treatment'],$taxDay,'Clasificación confirmada en importación '.$importId.' lote '.($chunk+1),$userId,$importId,$payloadHash]);
+        };
         if($warehouseId===null){
             $st=$db->prepare("SELECT id,name FROM warehouses WHERE business_id=? AND code='local' AND is_active=1 FOR UPDATE");
             $st->execute([$businessId]);
@@ -99,6 +127,8 @@ function importProducts(PDO $db,int $businessId,int $userId,array $input): array
                 // El stock del archivo entra SOLAMENTE en la sucursal elegida.
                 $create->execute([$businessId,$r['name'],$r['sku'],$r['barcode'],$r['price'],$r['unit']]);
                 $pid=(int)$db->lastInsertId();
+                $taxWrite($pid,$r);
+                if($taxMode===1)$priceAudit[]=['product_id'=>$pid,'source_price_clp'=>$r['source_price'],'source_basis'=>$r['source_basis'],'tax_treatment'=>$r['tax_treatment'],'stored_final_clp'=>$r['price']];
                 $initial=$r['stock']??'0.000';
                 if((float)$initial>0){
                     $after=titoApplyLocationStock($db,$businessId,$pid,$destinationId,(float)$initial);
@@ -114,6 +144,8 @@ function importProducts(PDO $db,int $businessId,int $userId,array $input): array
             $sku=$old['sku']??$r['sku'];$barcode=$old['barcode']??$r['barcode'];
             if($autoSku&&$sku===null)$sku=productAutoSku($db,$businessId);
             $pid=(int)$old['id'];
+            $taxWrite($pid,$r);
+            if($taxMode===1)$priceAudit[]=['product_id'=>$pid,'source_price_clp'=>$r['source_price'],'source_basis'=>$r['source_basis'],'tax_treatment'=>$r['tax_treatment'],'stored_final_clp'=>$r['price'],'previous_price_clp'=>(int)$old['price_clp']];
             $delta=0.0;
             if($mode!=='preserve_existing'){
                 // El producto se encuentra bloqueado con FOR UPDATE, por lo que
@@ -138,6 +170,7 @@ function importProducts(PDO $db,int $businessId,int $userId,array $input): array
             $summary['updated']++;
         }
         $finish=$db->prepare('UPDATE product_import_chunks SET result_json=? WHERE business_id=? AND import_id=? AND chunk_index=?');
+        if($taxMode===1)$summary['price_audit']=$priceAudit;
         $finish->execute([json_encode($summary,JSON_THROW_ON_ERROR),$businessId,$importId,$chunk]);
         $db->commit();
         return ['ok'=>true,'summary'=>$summary];

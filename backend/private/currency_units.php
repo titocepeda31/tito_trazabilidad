@@ -44,15 +44,26 @@ function registerCurrencyUnitRoutes(RouteCollectorProxy $group):void {
         $a=adminOnly($request);$day=titoCurrencyDay($request->getQueryParams()['date']??quoteToday());$r=titoCurrencyRate(db(),(int)$a['business_id'],$day);
         return respond($response,['date'=>$day,'rate'=>$r]);
     });
+    $group->post('/currency/uf/sync',static function(Request $request,Response $response):Response{
+        $a=adminOnly($request);$b=requestBody($request);$day=titoCurrencyDay($b['date']??null);$refresh=$b['refresh']??false;
+        if(!is_bool($refresh))fail('Opción de actualización inválida.',422);
+        $result=titoUfEnsure(db(),(int)$a['business_id'],(int)$a['id'],$day,$refresh);
+        return respond($response,$result);
+    });
     $group->post('/currency/uf',static function(Request $request,Response $response):Response{
         $a=adminOnly($request);$b=requestBody($request);$day=titoCurrencyDay($b['date']??null);
         $value=$b['clp_per_uf']??null;$scaled=titoCurrencyScaled($value,2,6);
         if($scaled<=0)fail('Valor UF inválido.',422);
-        $source=requireString($b,'source_reference',250);$db=db();
-        $s=$db->prepare('INSERT INTO business_uf_rates(business_id,rate_on,clp_per_uf,source_reference,recorded_by) VALUES(?,?,?,?,?)');
-        $s->execute([(int)$a['business_id'],$day,$value,$source,(int)$a['id']]);
-        $id=(int)$db->lastInsertId();
-        return respond($response,['rate'=>dteOne($db,'SELECT id,rate_on,clp_per_uf,source_reference,recorded_by,created_at FROM business_uf_rates WHERE business_id=? AND id=?',[(int)$a['business_id'],$id])],201);
+        $source=requireString($b,'source_reference',250);$db=db();$biz=(int)$a['business_id'];
+        $source='Manual: '.mb_substr($source,0,242);
+        $db->beginTransaction();try{
+            originLockCompany($db,$biz);
+            $s=$db->prepare('INSERT INTO business_uf_rates(business_id,rate_on,clp_per_uf,source_reference,recorded_by) VALUES(?,?,?,?,?)');
+            $s->execute([$biz,$day,$value,$source,(int)$a['id']]);
+            $id=(int)$db->lastInsertId();
+            $rate=dteOne($db,'SELECT id,rate_on,clp_per_uf,source_reference,recorded_by,created_at FROM business_uf_rates WHERE business_id=? AND id=?',[$biz,$id]);
+            $db->commit();return respond($response,['rate'=>$rate],201);
+        }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
     });
     $group->post('/currency/preview',static function(Request $request,Response $response):Response{
         $a=adminOnly($request);$b=requestBody($request);$day=titoCurrencyDay($b['date']??null);$amount=$b['amount']??null;

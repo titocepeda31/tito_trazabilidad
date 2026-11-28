@@ -20,6 +20,7 @@ import PilotSetupPanel from './PilotSetupPanel.jsx';
 import DtePanel from './DtePanel.jsx';
 import CurrencyPanel from './CurrencyPanel.jsx';
 import {ProductPriceDraftEntry} from './ProductPriceDraftPanel.jsx';
+import CommercialPriceFields,{commercialPayload} from './CommercialPriceFields.jsx';
 import WarehousesPanel from './WarehousesPanel.jsx';
 import AccountPanel from './AccountPanel.jsx';
 import OrganizationPanel from './OrganizationPanel.jsx';
@@ -321,7 +322,7 @@ function App() {
           {isAdmin&&<FinancialSummary request={request} notify={notify}/>}
           <section className="panel"><div className="panel-heading"><div><h3>Atención al inventario</h3><p>Productos con cinco unidades o menos</p></div><button className="text-button" onClick={()=>setPage('inventario')}>Ver inventario →</button></div>{!loaded ? <Empty text="Cargando productos…"/> : critical.length===0 ? <Empty text="No se detecta stock bajo en el listado actual."/> : <div className="table-wrap"><table><thead><tr><th>Producto</th><th>Código</th><th>Stock</th></tr></thead><tbody>{critical.slice(0,8).map(p=><tr key={p.id}><td><strong>{p.name}</strong></td><td className="mono">{p.sku||p.barcode}</td><td><span className="pill amber">{qtyFormat(p.stock_qty)} {p.sale_unit}</span></td></tr>)}</tbody></table></div>}</section>
         </>}
-        {page==='inventario' && <>{isAdmin&&<ProductPriceDraftEntry request={request} mode="manual"/>}<Inventory products={products} onChange={()=>refresh(false)} request={request} notify={notify} canManage={isAdmin} onOpenHistory={()=>setPage('auditoria')} /></>}
+        {page==='inventario' && <Inventory products={products} onChange={()=>refresh(false)} request={request} notify={notify} canManage={isAdmin} onOpenHistory={()=>setPage('auditoria')} />}
         {page==='auditoria' && isAdmin && <InventoryHistory request={request} notify={notify} products={products} onBack={()=>setPage('inventario')} />}
         {page==='dte' && isAdmin && <DtePanel request={request} notify={notify} onNavigate={setPage}/>}
         {page==='currency' && isAdmin && <CurrencyPanel request={request}/>}
@@ -376,6 +377,8 @@ function App() {
 function Stat({ label, value, detail, ico, warning }) { return <div className="stat-card"><div className="stat-head"><span>{label}</span><span className={'stat-icon '+(warning?'warn':'')}>{ico}</span></div><strong>{value}</strong><small>{detail}</small></div>; }
 function Empty({text}) { return <div className="empty">{text}</div>; }
 function Inventory({products,request,onChange,notify,canManage,onOpenHistory}) {
+  const [commercialSettings,setCommercialSettings]=useState(null),[commercialSettingsError,setCommercialSettingsError]=useState('');
+  useEffect(()=>{if(!canManage)return;let active=true;request('/currency/settings').then(r=>{if(active)setCommercialSettings(r.settings);}).catch(e=>{if(active)setCommercialSettingsError(e.message);});return()=>{active=false;};},[request,canManage]);
   const [query,setQuery]=useState(''); const [showNew,setShowNew]=useState(false); const [adjust,setAdjust]=useState(null); const [edit,setEdit]=useState(null); const [saving,setSaving]=useState(false);
   const [stockView,setStockView]=useState('all'); const [stockOrder,setStockOrder]=useState('name'); const [inventoryPage,setInventoryPage]=useState(1);
   const [localById,setLocalById]=useState(null);
@@ -425,7 +428,7 @@ function Inventory({products,request,onChange,notify,canManage,onOpenHistory}) {
   useEffect(()=>setInventoryPage(1),[query,stockView,stockOrder,stockLocation]);
   async function add(e) {
     e.preventDefault(); const f=new FormData(e.currentTarget); setSaving(true);
-    try { await request('/products',{method:'POST',body:{name:String(f.get('name')).trim(),sku:String(f.get('sku')).trim()||null,barcode:String(f.get('barcode')).trim()||null,generate_missing_sku:f.get('auto_sku')==='on',price_clp:Number(f.get('price')),stock_qty:Number(f.get('stock')),sale_unit:String(f.get('unit'))}}); notify('Producto creado correctamente.','success');setShowNew(false);onChange(); }
+    try { await request('/products',{method:'POST',body:{name:String(f.get('name')).trim(),sku:String(f.get('sku')).trim()||null,barcode:String(f.get('barcode')).trim()||null,generate_missing_sku:f.get('auto_sku')==='on',...commercialPayload(f),stock_qty:Number(f.get('stock')),sale_unit:String(f.get('unit'))}}); notify('Producto creado correctamente.','success');setShowNew(false);onChange(); }
     catch(err){notify(err.message,'error');} finally{setSaving(false);}
   }
   async function editProduct(e) {
@@ -436,7 +439,7 @@ function Inventory({products,request,onChange,notify,canManage,onOpenHistory}) {
       name:String(f.get('name')||'').trim(),
       sku:String(f.get('sku')||'').trim()||null,
       barcode:String(f.get('barcode')||'').trim()||null,
-      price_clp:Number(f.get('price')),
+      ...commercialPayload(f),
       generate_missing_sku:f.get('auto_sku')==='on'
     };
     if(!body.sku&&!body.barcode&&!body.generate_missing_sku){notify('Debes ingresar un SKU o código de barras.','error');return;}
@@ -502,17 +505,17 @@ function Inventory({products,request,onChange,notify,canManage,onOpenHistory}) {
         <label>Ordenar<select value={stockOrder} onChange={e=>setStockOrder(e.target.value)}><option value="name">Nombre A–Z</option><option value="stock_desc">Mayor stock primero</option><option value="stock_asc">Menor stock primero</option></select></label>
       </div>
       {stockLocation!=='total'&&!stocksReady&&<p className="warning-box">Cargando saldos de la ubicación… No se mostrarán existencias cero hasta verificar el servidor.</p>}
-      <div className="table-wrap"><table><thead><tr><th>Producto</th><th>SKU / Código</th><th>Precio</th><th>{chosenLocation?'Stock en '+chosenLocation.name:'Stock total'}</th><th></th></tr></thead><tbody>{inventoryPageData.rows.map(p=><tr key={p.id}><td><strong>{p.name}</strong><small className="sub">{p.sale_unit}</small></td><td className="mono">{p.sku||'—'}<small className="sub">{p.barcode||'Sin código de barras'}</small></td><td>{pesos(p.price_clp)}</td><td><span className={'pill '+(stockFor(p)===0?'red':stockFor(p)<=5?'amber':'green')}>{qtyFormat(stockFor(p))} {p.sale_unit}</span>{stockLocation==='total'&&locationById[Number(p.id)]&&<small className="sub">Local original: {qtyFormat(locationById[Number(p.id)].local)} · Bodega original: {qtyFormat(locationById[Number(p.id)].bodega)}</small>}</td><td>{canManage&&<div className="inline-actions"><button className="ghost mini" onClick={()=>setEdit(p)}>Editar</button><button className="ghost mini" onClick={()=>{setAdjustCode('local');setAdjust(p);}}>Ajustar stock</button></div>}</td></tr>)}</tbody></table>{stocksReady&&visible.length===0&&<Empty text="No hay productos que coincidan con estos filtros."/>}</div>
+      <div className="table-wrap"><table><thead><tr><th>Producto</th><th>SKU / Código</th><th>Precio</th><th>{chosenLocation?'Stock en '+chosenLocation.name:'Stock total'}</th><th></th></tr></thead><tbody>{inventoryPageData.rows.map(p=><tr key={p.id}><td><strong>{p.name}</strong><small className="sub">{p.sale_unit}</small></td><td className="mono">{p.sku||'—'}<small className="sub">{p.barcode||'Sin código de barras'}</small></td><td>{p.price_unit==='UF'&&p.commercial_price?<><strong>{Number(p.commercial_price.final_amount).toLocaleString('es-CL',{maximumFractionDigits:6})} UF</strong><small className="sub">Ref. {pesos(p.price_clp)} · {p.commercial_price.reference_date}</small><small className="sub">Venta pendiente</small></>:pesos(p.price_clp)}</td><td><span className={'pill '+(stockFor(p)===0?'red':stockFor(p)<=5?'amber':'green')}>{qtyFormat(stockFor(p))} {p.sale_unit}</span>{stockLocation==='total'&&locationById[Number(p.id)]&&<small className="sub">Local original: {qtyFormat(locationById[Number(p.id)].local)} · Bodega original: {qtyFormat(locationById[Number(p.id)].bodega)}</small>}</td><td>{canManage&&<div className="inline-actions"><button className="ghost mini" onClick={()=>setEdit(p)}>Editar</button><button className="ghost mini" onClick={()=>{setAdjustCode('local');setAdjust(p);}}>Ajustar stock</button></div>}</td></tr>)}</tbody></table>{stocksReady&&visible.length===0&&<Empty text="No hay productos que coincidan con estos filtros."/>}</div>
       <div className="list-pagination"><span>Mostrando {inventoryPageData.rows.length} de {inventoryPageData.total} productos filtrados · Página {inventoryPageData.page} de {inventoryPageData.pages}</span><div className="inline-actions"><button type="button" className="ghost mini" disabled={inventoryPageData.page<=1} onClick={()=>setInventoryPage(p=>p-1)}>← Anterior</button><button type="button" className="ghost mini" disabled={inventoryPageData.page>=inventoryPageData.pages} onClick={()=>setInventoryPage(p=>p+1)}>Siguiente →</button></div></div>
     </section>
-    {showNew && <Modal title="Nuevo producto" onClose={()=>setShowNew(false)}><form className="formstack" onSubmit={add}><label>Nombre<input required name="name" maxLength="120" placeholder="Ej. Tornillo 2 pulgadas"/></label><div className="field-row"><label>SKU<input name="sku" maxLength="50" placeholder="FER-001"/></label><label>Código de barras<input name="barcode" maxLength="50" placeholder="780…"/></label></div><div className="field-row"><label>Precio (CLP)<input name="price" type="number" min="0" max="1000000000" step="1" required /></label><label>Stock inicial<input name="stock" type="number" min="0" max="1000000000" step="0.001" defaultValue="0" required /></label></div><label>Unidad<select name="unit"><option value="unidad">Unidad</option><option value="kg">Kg</option><option value="litro">Litro</option></select></label><label><input type="checkbox" name="auto_sku"/> Generar SKU interno si queda vacío</label><p className="helper">Conserva los códigos del proveedor. Si no hay SKU ni código de barras, activa la generación automática.</p><button className="primary wide" disabled={saving}>{saving?'Guardando…':'Guardar producto'}</button></form></Modal>}
+    {showNew && <Modal title="Nuevo producto" onClose={()=>setShowNew(false)}><form className="formstack" onSubmit={add}><label>Nombre<input required name="name" maxLength="120" placeholder="Ej. Tornillo 2 pulgadas"/></label><div className="field-row"><label>SKU<input name="sku" maxLength="50" placeholder="FER-001"/></label><label>Código de barras<input name="barcode" maxLength="50" placeholder="780…"/></label></div>{commercialSettings?<CommercialPriceFields settings={commercialSettings}/>:<p role="alert">{commercialSettingsError||'Cargando unidades comerciales…'}</p>}<div className="field-row"><label>Stock inicial<input name="stock" type="number" min="0" max="1000000000" step="0.001" defaultValue="0" required /></label></div><label>Unidad<select name="unit"><option value="unidad">Unidad</option><option value="kg">Kg</option><option value="litro">Litro</option></select></label><label><input type="checkbox" name="auto_sku"/> Generar SKU interno si queda vacío</label><p className="helper">Conserva los códigos del proveedor. Si no hay SKU ni código de barras, activa la generación automática.</p><button className="primary wide" disabled={saving||!commercialSettings}>{saving?'Guardando…':'Guardar producto'}</button></form></Modal>}
     {edit&&<Modal title={'Editar producto · '+edit.name} onClose={()=>setEdit(null)}>
       <form className="formstack" onSubmit={editProduct}>
         <label>Nombre<input name="name" required maxLength="120" defaultValue={edit.name}/></label>
         <div className="field-row"><label>SKU<input name="sku" maxLength="50" defaultValue={edit.sku||''}/></label><label>Código de barras<input name="barcode" maxLength="50" defaultValue={edit.barcode||''}/></label></div>
-        {!edit.sku&&<label><input type="checkbox" name="auto_sku"/> Asignar SKU interno si queda vacío</label>}<label>Precio de lista (CLP)<input name="price" type="number" min="0" max="1000000000" step="1" defaultValue={edit.price_clp} required/></label>
+        {!edit.sku&&<label><input type="checkbox" name="auto_sku"/> Asignar SKU interno si queda vacío</label>}{commercialSettings?<CommercialPriceFields key={edit.id} product={edit} settings={commercialSettings}/>:<p role="alert">{commercialSettingsError||'Cargando unidades comerciales…'}</p>}
         <p className="helper">Stock actual: {qtyFormat(edit.stock_qty)} {edit.sale_unit}. Para cambiar existencias, usa «Ajustar stock» y selecciona la ubicación. Las ventas anteriores conservan sus precios registrados.</p>
-        <button className="primary wide" disabled={saving}>{saving?'Guardando…':'Guardar cambios'}</button>
+        <button className="primary wide" disabled={saving||!commercialSettings}>{saving?'Guardando…':'Guardar cambios'}</button>
       </form>
     </Modal>}
     {adjust && <Modal title={'Ajustar stock · '+adjust.name} onClose={()=>{if(!saving)setAdjust(null);}}>

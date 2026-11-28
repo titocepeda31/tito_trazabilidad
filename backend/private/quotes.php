@@ -163,7 +163,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             $s=db()->prepare('SELECT product_id,quantity,dispatched_quantity,(quantity-dispatched_quantity) AS remaining_quantity FROM serial_reservation_items WHERE business_id=? AND reservation_id=? ORDER BY product_id');
             $s->execute([$biz,$reservation['id']]);$reservation['items']=$s->fetchAll();$s->closeCursor();
         }
-        $s=db()->prepare('SELECT d.id,d.reservation_id,d.sale_id,d.total_clp,d.created_at,s.status AS sale_status FROM quote_dispatches d JOIN sales s ON s.id=d.sale_id AND s.business_id=d.business_id WHERE d.business_id=? AND d.quote_id=? ORDER BY d.id');
+        $s=db()->prepare('SELECT d.id,d.reservation_id,d.sale_id,d.total_clp,d.created_at,s.status AS sale_status,ca.id AS credit_account_id FROM quote_dispatches d JOIN sales s ON s.id=d.sale_id AND s.business_id=d.business_id LEFT JOIN credit_accounts ca ON ca.sale_id=s.id AND ca.business_id=s.business_id WHERE d.business_id=? AND d.quote_id=? ORDER BY d.id');
         $s->execute([$biz,$id]);$dispatches=$s->fetchAll();$s->closeCursor();
         return respond($response,['quote'=>quoteEffective($quote),'items'=>$items,'events'=>$events,'reservation'=>$reservation?:null,'dispatches'=>$dispatches]);
     });
@@ -410,9 +410,19 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
     $group->post('/quotes/{id:[0-9]+}/convert',static function(Request $request,Response $response,array $args): Response {
         $admin=adminOnly($request);$biz=(int)$admin['business_id'];$uid=(int)$admin['id'];$qid=(int)$args['id'];
         $b=requestBody($request);
-        if(array_diff(array_keys($b),['payment_method','warehouse_id','serial_items','reservation_id','request_id','revision','dispatch_items']))fail('Campos inesperados.',422);
+        if(array_diff(array_keys($b),['payment_method','warehouse_id','serial_items','reservation_id','request_id','revision','dispatch_items','due_date','initial_payment_clp','initial_payment_method','initial_payment_reference']))fail('Campos inesperados.',422);
         $payment=$b['payment_method']??null;
-        if(!in_array($payment,['efectivo','transferencia','tarjeta','otro'],true))fail('Medio de pago inválido.',422);
+        if(!in_array($payment,['efectivo','transferencia','tarjeta','otro','credito'],true))fail('Medio de pago inválido.',422);
+        $credit=$payment==='credito';$due=null;$initial=0;$initialMethod=null;$initialRef=null;
+        if($credit){
+            $due=reservationDate($b['due_date']??null);
+            $initial=titoCreditUnsigned($b['initial_payment_clp']??0,'abono al entregar');
+            if($initial>0){
+                $initialMethod=$b['initial_payment_method']??null;
+                if(!in_array($initialMethod,['efectivo','transferencia','tarjeta','otro'],true))fail('Medio de abono inválido.',422);
+                $initialRef=titoCreditString($b,'initial_payment_reference',120);
+            }elseif(isset($b['initial_payment_method'])||isset($b['initial_payment_reference']))fail('No indiques medio ni referencia sin abono.',422);
+        }elseif(array_intersect(array_keys($b),['due_date','initial_payment_clp','initial_payment_method','initial_payment_reference']))fail('Condiciones de pago a plazo no corresponden a venta al contado.',422);
         $warehouse=originId($b['warehouse_id']??null,'warehouse_id');
         $resId=array_key_exists('reservation_id',$b)?reservationId($b['reservation_id']):null;
         $dispatch=null;$dispatchRequest=null;$dispatchRevision=null;$dispatchHash=null;
@@ -444,6 +454,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
         }
         ksort($series,SORT_NUMERIC);
         $canonical=[$warehouse,$payment,$series];if($resId!==null)$canonical[]=$resId;
+        if($credit)$canonical[]=['due_date'=>$due,'initial_payment_clp'=>$initial,'initial_payment_method'=>$initialMethod,'initial_payment_reference'=>$initialRef];
         $conversionHash=hash('sha256',json_encode($canonical,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
         $db=db();
         try{
@@ -464,6 +475,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
                 if(($prior!==false&&$prior!==null&&!hash_equals((string)$prior,$conversionHash))||(($prior===false||$prior===null)&&($series||$resId!==null)))fail('La cotización ya fue convertida con otras condiciones. Consulta la venta #'.$quote['converted_sale_id'].'.',409);
                 $db->commit();return respond($response,['ok'=>true,'quote_id'=>$qid,'sale_id'=>(int)$quote['converted_sale_id'],'already_recorded'=>true]);
             }
+            if($credit&&$due<quoteToday())fail('La fecha de compromiso no puede ser anterior a hoy.',422);
             $from=$resId===null?'accepted':'reserved';
             if($quote['status']!==$from)fail('Se requiere cotización aceptada o su reserva pendiente, según la operación.',409);
             $reserved=[];$delivered=[];$remaining=[];$isFinal=true;
@@ -521,6 +533,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
                 $controlled=serialControlled($db,$biz,$pid);
                 if($p['sale_unit']==='unidad'&&floor($qty)!==$qty)fail('El producto requiere cantidades enteras.',422);
                 if($controlled){
+                    if($credit)fail('Venta a plazo de equipos serializados todavía no habilitada: falta integrar sus devoluciones y reversas.',409);
                     $controlledIds[$pid]=true;
                     if($p['sale_unit']!=='unidad'||$qty!==(float)count($series[$pid]??[]))throw new HttpError('Selecciona exactamente una serie por unidad de '.$p['name'].'.',422,'serial_numbers');
                     serialReconcile($db,$biz,$pid,(float)$p['stock_qty']);
@@ -528,10 +541,11 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
                 serialRequireFree($db,$biz,$pid,$saleLocation,$qty,$resId);
             }
             if(array_diff_key($series,$controlledIds))fail('Se enviaron series para productos no serializados o ajenos a la cotización.',422);
+            if($credit){$expected=array_sum(array_map(static fn($i)=>(int)$i['subtotal_clp'],$items));if($expected<=0||$initial>=$expected)fail('La venta a plazo requiere un saldo positivo. Para pago total usa contado.',422);}
             // Cada entrega registra una venta independiente; cotización y reserva están bloqueadas.
             $rid=sprintf('%08x-%04x-4%03x-%04x-%012x',random_int(0,0xffffffff),random_int(0,0xffff),random_int(0,0xfff),random_int(0x8000,0xbfff),random_int(0,0xffffffffffff));
             $st=$db->prepare('INSERT INTO sales(business_id,sold_by,request_id,payment_method,total_clp,warehouse_id,cash_session_id,client_id,client_name_snapshot,client_rut_snapshot,customer_mode) VALUES(?,?,?,?,0,?,?,?,?,?,?)');
-            $st->execute([$biz,$uid,$rid,$payment,$saleLocation,$cashSessionId,$quote['client_id'],$quote['client_id']===null?null:$quote['customer_name'],$quote['customer_rut'],$quote['client_id']===null?null:'registered']);$sid=(int)$db->lastInsertId();
+            $st->execute([$biz,$uid,$rid,$credit?'otro':$payment,$saleLocation,$cashSessionId,$quote['client_id'],$quote['client_id']===null?null:$quote['customer_name'],$quote['customer_rut'],$quote['client_id']===null?null:'registered']);$sid=(int)$db->lastInsertId();
             if($controlledIds){
                 $st=$db->prepare('INSERT INTO serial_sale_snapshots(sale_id,business_id,client_id,client_name,payload_hash) VALUES(?,?,?,?,?)');
                 $st->execute([$sid,$biz,(int)$quote['client_id'],$quote['customer_name'],$conversionHash]);
@@ -559,7 +573,19 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             $st=$db->prepare("UPDATE quotes SET status=?,converted_sale_id=?,revision=revision+1 WHERE id=? AND business_id=? AND status=?");
             $st->execute([$to,$isFinal?$sid:null,$qid,$biz,$from]);
             if($st->rowCount()!==1)throw new RuntimeException('No se pudo convertir la cotización.');
-            titoCashRegisterSale($db,$biz,$uid,$cashSessionId,$sid,$rid,$total,$payment);
+            $accountId=null;
+            if($credit){
+                // Aprobación explícita por administrador en la cotización; no exigir cupo heredado.
+                $st=$db->prepare('INSERT INTO credit_accounts(business_id,client_id,sale_id,created_by,request_id,payload_hash,original_total_clp,due_date,notes) VALUES(?,?,?,?,?,?,?,?,?)');
+                $st->execute([$biz,$quote['client_id'],$sid,$uid,$rid,$dispatchHash??$conversionHash,$total,$due,'Venta comercial desde cotización #'.$qid]);
+                $accountId=(int)$db->lastInsertId();
+                if($initial>0){
+                    $paymentHash=hash('sha256',json_encode([$accountId,$initial,$initialMethod,$initialRef],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
+                    $st=$db->prepare('INSERT INTO credit_payments(business_id,account_id,created_by,request_id,payload_hash,amount_clp,method,reference,cash_session_id) VALUES(?,?,?,?,?,?,?,?,?)');
+                    $st->execute([$biz,$accountId,$uid,$rid,$paymentHash,$initial,$initialMethod,$initialRef,$cashSessionId]);$paymentId=(int)$db->lastInsertId();
+                    if($initialMethod==='efectivo')titoCashRegisterExternal($db,$biz,$uid,$cashSessionId,'credit_payment',$paymentId,$initial);
+                }
+            }else titoCashRegisterSale($db,$biz,$uid,$cashSessionId,$sid,$rid,$total,$payment);
             if($resId!==null){
                 $s=$db->prepare('UPDATE serial_reservation_items SET dispatched_quantity=dispatched_quantity+? WHERE business_id=? AND reservation_id=? AND product_id=? AND dispatched_quantity+?<=quantity');
                 foreach($items as $item){$s->execute([$item['quantity'],$biz,$resId,$item['product_id'],$item['quantity']]);if($s->rowCount()!==1)fail('Saldo de reserva cambió.',409);}
@@ -567,9 +593,9 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
                 $s->execute([$biz,$qid,$resId,$sid,$uid,$dispatchRequest,$dispatchHash,$total]);
                 if($isFinal)reservationComplete($db,$biz,$resId,$sid,$uid);
             }
-            quoteEvent($db,$biz,$qid,$uid,$isFinal?'converted':'partial_dispatch',$from,$to,null,['sale_id'=>$sid,'reservation_id'=>$resId,'total_clp'=>$total,'warehouse_id'=>$saleLocation,'payment_method'=>$payment,'serial_items'=>$series,'items'=>array_map(static fn($i)=>['product_id'=>$i['product_id'],'quantity'=>$i['quantity'],'subtotal_clp'=>$i['subtotal_clp']],$items)],$dispatchRequest,$dispatchHash??$conversionHash);
+            quoteEvent($db,$biz,$qid,$uid,$isFinal?'converted':'partial_dispatch',$from,$to,null,['sale_id'=>$sid,'reservation_id'=>$resId,'total_clp'=>$total,'warehouse_id'=>$saleLocation,'payment_method'=>$payment,'credit_account_id'=>$accountId,'due_date'=>$due,'initial_payment_clp'=>$initial,'serial_items'=>$series,'items'=>array_map(static fn($i)=>['product_id'=>$i['product_id'],'quantity'=>$i['quantity'],'subtotal_clp'=>$i['subtotal_clp']],$items)],$dispatchRequest,$dispatchHash??$conversionHash);
             $db->commit();
-            return respond($response,['ok'=>true,'quote_id'=>$qid,'sale_id'=>$sid,'total_clp'=>$total,'warehouse_id'=>$saleLocation,'complete'=>$isFinal],201);
+            return respond($response,['ok'=>true,'quote_id'=>$qid,'sale_id'=>$sid,'total_clp'=>$total,'warehouse_id'=>$saleLocation,'complete'=>$isFinal,'credit_account_id'=>$accountId,'balance_clp'=>$credit?$total-$initial:0],201);
         }catch(Throwable $e){
             if($db->inTransaction())$db->rollBack();
             throw $e;

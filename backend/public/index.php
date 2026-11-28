@@ -25,6 +25,7 @@ require __DIR__ . '/../private/receipts.php';
 require __DIR__ . '/../private/inventory_reports.php';
 require __DIR__ . '/../private/quotes.php';
 require __DIR__ . '/../private/customer_returns.php';
+require __DIR__ . '/../private/service_cases.php';
 require __DIR__ . '/../private/habitual_credit.php';
 require __DIR__ . '/../private/credit_operations.php';
 require __DIR__ . '/../private/product_creations.php';
@@ -366,6 +367,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
     registerInventoryReportRoutes($group);
     registerQuoteRoutes($group);
     registerCustomerReturnRoutes($group);
+    registerServiceRoutes($group);
     registerHabitualCreditRoutes($group);
     registerCreditOperationsRoutes($group);
     registerProductCreationAuditRoutes($group);

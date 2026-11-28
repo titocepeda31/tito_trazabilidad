@@ -7,6 +7,7 @@ const date=v=>String(v||'').slice(0,16)||'—';
 const label=(map,v)=>map[v]||v||'—';
 const payment={efectivo:'Efectivo',transferencia:'Transferencia',tarjeta:'Tarjeta',otro:'Otro'};
 const tabs=[
+ ['followups','Seguimiento',[['quote_id','Cotización'],['kind','Tipo',v=>label({contact:'Contacto',task:'Acción'},v)],['channel','Canal',v=>label({phone:'Teléfono',email:'Correo',whatsapp:'WhatsApp',meeting:'Reunión',other:'Otro'},v)],['note','Detalle'],['assigned_email','Responsable'],['due_on','Fecha límite'],['status','Estado',v=>label({recorded:'Registrado',pending:'Pendiente',done:'Realizada',cancelled:'Cancelada'},v)],['created_at','Registro',date],['close_note','Resultado']]],
  ['quotes','Cotizaciones',[['id','N.º',v=>'#'+v],['created_at','Fecha',date],['effective_status','Estado',v=>label(quoteStates,v)],['valid_until','Vigencia'],['total_clp','Total',pesos]]],
  ['reservations','Reservas',[['id','N.º',v=>'#'+v],['quote_id','Cotización'],['warehouse_name','Bodega'],['created_at','Fecha',date],['expires_on','Fecha límite'],['effective_status','Estado',v=>label(resStates,v)],['remaining_lines','Líneas con saldo', (v,r)=>r.effective_status==='pending'?v:'—']]],
  ['sales','Ventas',[['id','Venta',v=>'#'+v],['created_at','Fecha',date],['status','Estado',v=>label(saleStates,v)],['quote_id','Cotización'],['warehouse_name','Bodega'],['payment_method','Medio',v=>label(payment,v)],['total_clp','Total',pesos]]],

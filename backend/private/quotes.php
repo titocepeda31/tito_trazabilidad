@@ -65,6 +65,66 @@ function quoteDraftLines(PDO $db,int $biz,array $items,array $old): array {
 }
 
 function registerQuoteRoutes(RouteCollectorProxy $group): void {
+    // Agenda comercial: solo administradores de la empresa en esta fase.
+    $group->get('/quotes/followups',static function(Request $request,Response $response): Response {
+        $a=adminOnly($request);$biz=(int)$a['business_id'];$db=db();$p=$request->getQueryParams();
+        $qid=isset($p['quote_id'])?filter_var($p['quote_id'],FILTER_VALIDATE_INT,['options'=>['min_range'=>1]]):null;
+        $page=filter_var($p['page']??1,FILTER_VALIDATE_INT,['options'=>['min_range'=>1,'max_range'=>100000]]);
+        $filter=$p['filter']??($qid===null?'pending':'all');
+        if($qid===false||$page===false||!in_array($filter,['all','pending','overdue','done','cancelled','recorded'],true))fail('Filtro inválido.',422);
+        if($qid!==null){$s=$db->prepare('SELECT id FROM quotes WHERE business_id=? AND id=?');$s->execute([$biz,$qid]);$exists=$s->fetchColumn();$s->closeCursor();if(!$exists)fail('Cotización no encontrada.',404);}
+        $where=' WHERE f.business_id=?';$params=[$biz];
+        if($qid!==null){$where.=' AND f.quote_id=?';$params[]=$qid;}
+        if($filter==='overdue'){$where.=" AND f.status='pending' AND f.due_on<?";$params[]=quoteToday();}
+        elseif($filter!=='all'){$where.=' AND f.status=?';$params[]=$filter;}
+        $order=$qid===null?" ORDER BY (f.status='pending') DESC,f.due_on ASC,f.id DESC":" ORDER BY f.id DESC";
+        $offset=($page-1)*25;
+        $s=$db->prepare('SELECT f.id,f.quote_id,f.client_id,f.kind,f.channel,f.note,f.due_on,f.status,f.created_at,f.closed_at,f.close_note,q.customer_name,q.status AS quote_status,u.email AS assigned_email,c.email AS created_email,cl.email AS closed_email FROM quote_followups f JOIN quotes q ON q.id=f.quote_id AND q.business_id=f.business_id JOIN users u ON u.id=f.assigned_to AND u.business_id=f.business_id JOIN users c ON c.id=f.created_by AND c.business_id=f.business_id LEFT JOIN users cl ON cl.id=f.closed_by AND cl.business_id=f.business_id'.$where.$order.' LIMIT 26 OFFSET '.$offset);
+        $s->execute($params);$rows=$s->fetchAll();$s->closeCursor();
+        $s=$db->prepare("SELECT id,email FROM users WHERE business_id=? AND role='admin' AND is_active=1 ORDER BY email,id LIMIT 200");$s->execute([$biz]);$users=$s->fetchAll();$s->closeCursor();
+        return respond($response,['rows'=>array_slice($rows,0,25),'more'=>count($rows)>25,'page'=>$page,'today'=>quoteToday(),'assignees'=>$users,'actor_id'=>(int)$a['id']]);
+    });
+    $group->post('/quotes/{id:[0-9]+}/followups',static function(Request $request,Response $response,array $args): Response {
+        $a=adminOnly($request);$biz=(int)$a['business_id'];$uid=(int)$a['id'];$qid=(int)$args['id'];$b=requestBody($request);
+        if(array_diff(array_keys($b),['request_id','kind','channel','note','due_on','assigned_to']))fail('Campos no permitidos.',422);
+        $rid=$b['request_id']??null;if(!is_string($rid)||!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iD',$rid))fail('Solicitud inválida.',422);$rid=strtolower($rid);
+        $kind=$b['kind']??null;$channel=$b['channel']??null;
+        if(!in_array($kind,['contact','task'],true)||!in_array($channel,['phone','email','whatsapp','meeting','other'],true))fail('Tipo o canal inválido.',422);
+        $note=requireString($b,'note',1000);if(mb_strlen($note)<3)fail('Describe la gestión comercial.',422);
+        $assigned=originId($b['assigned_to']??null,'assigned_to');if(!$assigned)fail('Selecciona responsable.',422);
+        $due=$kind==='task'?reservationDate($b['due_on']??null):null;
+        if($kind==='contact'&&isset($b['due_on']))fail('Un contacto registrado no tiene fecha pendiente.',422);
+        $hash=hash('sha256',json_encode([$qid,$uid,$kind,$channel,$note,$assigned,$due],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
+        $db=db();$db->beginTransaction();
+        try{
+            originLockCompany($db,$biz);$q=quoteLock($db,$biz,$qid);
+            $s=$db->prepare('SELECT id,payload_hash FROM quote_followups WHERE business_id=? AND request_id=? FOR UPDATE');$s->execute([$biz,$rid]);$old=$s->fetch();$s->closeCursor();
+            if($old){if(!hash_equals((string)$old['payload_hash'],$hash))fail('Solicitud reutilizada con otros datos.',409);$db->commit();return respond($response,['ok'=>true,'followup_id'=>(int)$old['id'],'already_recorded'=>true]);}
+            if($q['status']==='draft'||$q['client_id']===null)fail('Registra primero el envío de una cotización vinculada a cliente.',409);
+            if($due!==null&&$due<quoteToday())fail('La próxima acción no puede programarse en el pasado.',422);
+            $s=$db->prepare("SELECT id FROM users WHERE business_id=? AND id=? AND role='admin' AND is_active=1 FOR UPDATE");$s->execute([$biz,$assigned]);$ok=$s->fetchColumn();$s->closeCursor();if(!$ok)fail('Responsable no disponible.',422);
+            $s=$db->prepare('INSERT INTO quote_followups(business_id,quote_id,client_id,kind,channel,note,due_on,assigned_to,created_by,request_id,payload_hash,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)');
+            $s->execute([$biz,$qid,$q['client_id'],$kind,$channel,$note,$due,$assigned,$uid,$rid,$hash,$kind==='task'?'pending':'recorded']);$id=(int)$db->lastInsertId();
+            $db->commit();return respond($response,['ok'=>true,'followup_id'=>$id],201);
+        }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
+    });
+    $group->post('/quotes/{id:[0-9]+}/followups/{fid:[0-9]+}/close',static function(Request $request,Response $response,array $args): Response {
+        $a=adminOnly($request);$biz=(int)$a['business_id'];$uid=(int)$a['id'];$qid=(int)$args['id'];$fid=(int)$args['fid'];$b=requestBody($request);
+        if(array_diff(array_keys($b),['request_id','status','note']))fail('Campos no permitidos.',422);
+        $rid=$b['request_id']??null;if(!is_string($rid)||!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iD',$rid))fail('Solicitud inválida.',422);$rid=strtolower($rid);
+        $to=$b['status']??null;if(!in_array($to,['done','cancelled'],true))fail('Estado inválido.',422);
+        $note=requireString($b,'note',500);if(mb_strlen($note)<3)fail('Indica resultado o motivo.',422);
+        $hash=hash('sha256',json_encode([$qid,$fid,$uid,$to,$note],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
+        $db=db();$db->beginTransaction();
+        try{
+            originLockCompany($db,$biz);quoteLock($db,$biz,$qid);
+            $s=$db->prepare('SELECT id,close_payload_hash FROM quote_followups WHERE business_id=? AND close_request_id=? FOR UPDATE');$s->execute([$biz,$rid]);$old=$s->fetch();$s->closeCursor();
+            if($old){if((int)$old['id']!==$fid||!hash_equals((string)$old['close_payload_hash'],$hash))fail('Solicitud reutilizada con otros datos.',409);$db->commit();return respond($response,['ok'=>true,'already_recorded'=>true]);}
+            $s=$db->prepare("UPDATE quote_followups SET status=?,closed_by=?,closed_at=UTC_TIMESTAMP(),close_note=?,close_request_id=?,close_payload_hash=? WHERE business_id=? AND quote_id=? AND id=? AND kind='task' AND status='pending'");
+            $s->execute([$to,$uid,$note,$rid,$hash,$biz,$qid,$fid]);if($s->rowCount()!==1)fail('Acción no disponible o ya cerrada.',409);
+            $db->commit();return respond($response,['ok'=>true]);
+        }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
+    });
     $group->get('/quotes/clients',static function(Request $request,Response $response): Response {
         $actor=quoteCreationActor($request);$biz=(int)$actor['business_id'];
         $q=$request->getQueryParams()['q']??'';

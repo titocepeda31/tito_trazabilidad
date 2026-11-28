@@ -3,6 +3,7 @@ import {newId,pesos,qtyFormat} from './api.js';
 import {openQuoteEmail,shareQuotePdf} from './quoteShare.js';
 import QuoteClientPicker from './QuoteClientPicker.jsx';
 import QuoteConversionPanel from './QuoteConversionPanel.jsx';
+import QuoteFollowupsPanel from './QuoteFollowupsPanel.jsx';
 
 const defaultDate=()=>{const d=new Date();d.setDate(d.getDate()+7);return d.toLocaleDateString('sv-SE',{timeZone:'America/Santiago'});};
 const storage='tito_pending_quote';
@@ -141,8 +142,9 @@ export default function QuotesPanel({products,request,notify,onSale,businessName
   const hasSerial=Boolean(selected?.items.some(i=>Number(i.serial_control)===1));
   const canReserve=Boolean(selected?.items.length&&selected.items.every(i=>{const n=Number(i.quantity),controlled=Number(i.serial_control)===1;return Number.isFinite(n)&&n>0&&n<=1000000000&&Math.abs(n*1000-Math.round(n*1000))<=0.00001&&(i.sale_unit!=='unidad'||Number.isInteger(n))&&(!controlled||(i.sale_unit==='unidad'&&n<=500));}));
   if(['convert','reserve','dispatch'].includes(screen)&&selected)return <QuoteConversionPanel key={screen+'-'+selected.quote.id} mode={screen==='reserve'?'reserve':screen==='dispatch'?'dispatch':'sale'} data={selected} request={request} notify={notify} locations={saleLocations} initialLocation={saleLocationId} onBack={()=>setScreen('detail')} onDone={()=>conversionDone(selected.quote.id)} onCheck={()=>view(selected.quote.id)}/>;
+  if(screen==='followups'||screen==='quote-followups')return <QuoteFollowupsPanel key={screen==='quote-followups'?selected.quote.id:'agenda'} quote={screen==='quote-followups'?selected.quote:null} request={request} notify={notify} onBack={()=>setScreen(screen==='quote-followups'?'detail':'list')} onQuote={view}/>;
   return <div className="quotes-page">
-    {screen==='list'&&<div className="section-intro"><div><p className="eyebrow">VENTAS</p><h2>Cotizaciones</h2><p className="muted">Presupuesta sin descontar ni reservar existencias.</p></div><button type="button" className="primary" disabled={busy} onClick={openNew}>+ Nueva cotización</button></div>}
+    {screen==='list'&&<div className="section-intro"><div><p className="eyebrow">VENTAS</p><h2>Cotizaciones</h2><p className="muted">Presupuesta sin descontar ni reservar existencias.</p></div><div className="inline-actions"><button type="button" className="ghost" disabled={busy} onClick={()=>setScreen('followups')}>Agenda comercial</button><button type="button" className="primary" disabled={busy} onClick={openNew}>+ Nueva cotización</button></div></div>}
     {screen==='new'&&<><div className="section-intro"><div><button type="button" className="text-button" disabled={locked} onClick={backFromNew}>← Volver a cotizaciones</button><h2>{editing?'Editar borrador #'+editing.id:'Nueva cotización'}</h2><p className="muted">Selecciona un cliente y los productos a cotizar.</p></div></div><section className="panel pad quote-form">
       <div className="panel-heading"><div><h3>{editing?'Modificar datos del borrador':'Datos de cotización'}</h3><p>Los presupuestos no son documentos tributarios del SII.</p></div></div>
       {pending&&<div className="receipt-alert"><strong>Envío pendiente de confirmar</strong><p>Verifica el historial o reintenta exactamente el mismo registro antes de crear otro.</p><div className="receipt-buttons"><button type="button" className="primary" disabled={busy} onClick={()=>save(pending)}>Reintentar el mismo registro</button><button type="button" className="ghost" disabled={busy} onClick={()=>{if(window.confirm('¿Comprobaste que no está registrada antes de descartar el envío?')){sessionStorage.removeItem(storage);setPending(null);}}}>Descartar tras verificar</button></div></div>}
@@ -171,7 +173,7 @@ export default function QuotesPanel({products,request,notify,onSale,businessName
       <p>{selected.quote.notes||''}</p><p className="helper">Los precios de esta cotización se respetan durante su vigencia, sujetos a stock disponible y a que los productos sigan activos y con la misma unidad de venta. No constituye factura, boleta ni documento tributario.</p>
     </div><div className="quote-actions">
       <section className="panel pad formstack">
-        <h3>Seguimiento comercial</h3>
+        <h3>Seguimiento comercial</h3>{selected.quote.client_id&&selected.quote.status!=='draft'&&<button type="button" className="ghost" disabled={busy} onClick={()=>setScreen('quote-followups')}>Contactos y próximas acciones</button>}
         <p className="helper">Creada por {selected.quote.created_by_email||'—'} · Revisión {selected.quote.revision}</p>
         {statusOf(selected.quote)==='draft'&&<button type="button" className="ghost" disabled={busy} onClick={openEdit}>Editar borrador</button>}
         {['draft','sent'].includes(statusOf(selected.quote))&&<><label>Observación / motivo<textarea rows={3} maxLength={500} disabled={busy} value={statusNote} onChange={e=>setStatusNote(e.target.value)}/></label>

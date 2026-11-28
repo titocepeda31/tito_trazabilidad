@@ -82,6 +82,8 @@ function serialSaleLineUnits(PDO $db,int $biz,int $sale,int $line): array {
 }
 function serialRestoreUnits(PDO $db,array $actor,int $sale,int $line,int $pid,int $warehouse,array $numbers,string $kind,?int $returnId,string $reason,?int $creditAdjustmentId=null): void {
     $biz=(int)$actor['business_id'];$uid=(int)$actor['id'];
+    $check=$db->prepare('SELECT 1 FROM warranty_free_exchanges e JOIN serial_units x ON x.id=e.root_unit_id AND x.business_id=e.business_id JOIN serial_sale_units su ON su.unit_id=e.root_unit_id AND su.sale_id=e.sale_id WHERE e.business_id=? AND e.sale_id=? AND su.sale_item_id=? AND x.serial_number=? LIMIT 1');
+    foreach($numbers as $number){$check->execute([$biz,$sale,$line,$number]);$used=$check->fetchColumn();$check->closeCursor();if($used)fail('La serie tiene un cambio gratuito registrado. Revisar la devolución financiera de la cadena antes de continuar.',409);}
     if($creditAdjustmentId!==null&&$returnId!==null)throw new RuntimeException('Origen de reversa ambiguo.');
     if(!in_array($kind,['commercial','warranty','void'],true)||!$numbers)throw new RuntimeException('Reversa serializada inválida.');
     $w=$db->prepare('SELECT id FROM warehouses WHERE id=? AND business_id=? AND is_active=1 FOR UPDATE');$w->execute([$warehouse,$biz]);if(!$w->fetchColumn())fail('La bodega histórica no está activa; revisar destino antes de devolver.',409);$w->closeCursor();

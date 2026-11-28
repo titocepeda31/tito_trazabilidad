@@ -110,12 +110,14 @@ function registerHabitualCreditRoutes(RouteCollectorProxy $group): void {
     $group->get('/clients/commercial/{id:[0-9]+}/history',static function(Request $request,Response $response,array $args): Response {
         $a=adminOnly($request);$biz=(int)$a['business_id'];$cid=(int)$args['id'];$db=db();$q=$request->getQueryParams();
         $tab=$q['tab']??'quotes';$page=filter_var($q['page']??1,FILTER_VALIDATE_INT,['options'=>['min_range'=>1,'max_range'=>100000]]);
-        if(!is_string($tab)||!in_array($tab,['quotes','reservations','sales','products','series','returns','assessments','followups','receivables','service','warranties','repair_warranties','replacements'],true)||$page===false)fail('Filtro inválido.',422);
+        if(!is_string($tab)||!in_array($tab,['quotes','reservations','sales','products','series','returns','assessments','followups','receivables','service','warranties','repair_warranties','replacements','free_exchanges'],true)||$page===false)fail('Filtro inválido.',422);
         $s=$db->prepare('SELECT id,name,rut,is_active FROM habitual_clients WHERE business_id=? AND id=?');$s->execute([$biz,$cid]);$client=$s->fetch();$s->closeCursor();if(!$client)fail('Cliente no encontrado.',404);
         // Para ventas históricas sin client_id, usar únicamente un vínculo explícito existente (serie o cuenta de crédito).
         $saleScope="s.business_id=? AND (s.client_id=? OR (s.client_id IS NULL AND (EXISTS(SELECT 1 FROM serial_sale_snapshots ss WHERE ss.business_id=s.business_id AND ss.sale_id=s.id AND ss.client_id=?) OR EXISTS(SELECT 1 FROM credit_accounts ca WHERE ca.business_id=s.business_id AND ca.sale_id=s.id AND ca.client_id=?))))";
         $params=[$biz,$cid,$cid,$cid];$offset=($page-1)*25;
         switch($tab){
+            case 'free_exchanges':
+                $sql=freeExchangeSql().' WHERE e.business_id=? AND e.client_id=? ORDER BY e.id DESC';$params=[$biz,$cid];break;
             case 'replacements':
                 $sql=replacementSql().' WHERE r.business_id=? AND r.client_id=? ORDER BY r.id DESC';$params=[$biz,$cid];break;
             case 'repair_warranties':
@@ -123,7 +125,7 @@ function registerHabitualCreditRoutes(RouteCollectorProxy $group): void {
             case 'warranties':
                 $sql=warrantyViewSql().' WHERE c.business_id=? AND c.client_id=? ORDER BY c.id DESC';$params=[$biz,$cid];break;
             case 'service':
-                $sql="SELECT c.id,c.sale_id,c.status,c.custody,c.problem,c.created_at,x.serial_number,p.name AS product_name FROM service_cases c JOIN serial_units x ON x.id=c.unit_id AND x.business_id=c.business_id JOIN products p ON p.id=x.product_id AND p.business_id=c.business_id WHERE c.business_id=? AND c.client_id=? ORDER BY c.id DESC";
+                $sql="SELECT c.id,c.sale_id,c.status,c.custody,c.problem,c.created_at,x.serial_number,p.name AS product_name FROM service_cases c JOIN serial_units x ON x.id=COALESCE(c.physical_unit_id,c.unit_id) AND x.business_id=c.business_id JOIN products p ON p.id=x.product_id AND p.business_id=c.business_id WHERE c.business_id=? AND c.client_id=? ORDER BY c.id DESC";
                 $params=[$biz,$cid];break;
             case 'receivables':
                 $sql=titoCreditAccountListSql().' WHERE a.business_id=? AND a.client_id=? ORDER BY a.id DESC';

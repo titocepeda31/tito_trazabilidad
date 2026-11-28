@@ -1,5 +1,6 @@
 import React,{useState} from 'react';
 export function commercialPayload(form){
+ if(!form.has('price_unit'))return {price_clp:Number(form.get('price'))};
  const price_unit=String(form.get('price_unit'));
  return {commercial_price:{price_unit,source_amount:String(form.get('source_amount')||'').trim().replace(',','.'),source_basis:String(form.get('source_basis')),tax_treatment:String(form.get('tax_treatment'))}};
 }

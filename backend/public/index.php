@@ -36,6 +36,7 @@ require __DIR__ . '/../private/pilot_setup.php';
 require __DIR__ . '/../private/dte.php';
 require __DIR__ . '/../private/dte_tax.php';
 require __DIR__ . '/../private/currency_units.php';
+require __DIR__ . '/../private/product_price_drafts.php';
 require __DIR__ . '/../private/habitual_credit.php';
 require __DIR__ . '/../private/client_import.php';
 require __DIR__ . '/../private/credit_operations.php';
@@ -383,6 +384,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
     registerDteRoutes($group);
     registerDteTaxRoutes($group);
     registerCurrencyUnitRoutes($group);
+    registerProductPriceDraftRoutes($group);
     registerReservationRoutes($group);
     registerCatalogMaintenanceRoutes($group);
     registerLabelRoutes($group);

@@ -1,5 +1,8 @@
--- 040: historial de precios comerciales CLP/UF. SOLO rama de desarrollo.
--- No aplicar en producción hasta integrar ventas, cotizaciones, crédito y DTE.
+-- 040: catálogo de precios comerciales CLP/UF e historial.
+-- Aplicar una sola vez en phpMyAdmin después de 038 y 039, con respaldo previo.
+-- Esta etapa habilita el catálogo; ventas y cotizaciones UF siguen bloqueadas.
+-- Si una sentencia falla, no volver a ejecutar todo: revisar tabla y triggers existentes.
+-- El backend exige los tres triggers antes de habilitar el formulario comercial.
 CREATE TABLE IF NOT EXISTS maderas7_ttrazabilidad.product_commercial_prices (
  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
  business_id BIGINT UNSIGNED NOT NULL,
@@ -47,3 +50,8 @@ BEGIN
  END IF;
 END//
 DELIMITER ;
+
+-- Verificar: debe devolver 3.
+SELECT COUNT(*) AS protecciones_instaladas FROM information_schema.TRIGGERS
+ WHERE TRIGGER_SCHEMA='maderas7_ttrazabilidad'
+ AND TRIGGER_NAME IN ('tito_uf_catalog_block_sale_item','tito_uf_catalog_block_quote_item','tito_uf_catalog_block_legacy_update');

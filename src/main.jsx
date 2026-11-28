@@ -13,6 +13,7 @@ import ServiceCasesPanel from './ServiceCasesPanel.jsx';
 import WarrantiesPanel from './WarrantiesPanel.jsx';
 import ClientsPanel from './ClientsPanel.jsx';
 import FinancialSummary from './FinancialSummary.jsx';
+import ManagementDashboard from './ManagementDashboard.jsx';
 import WarehousesPanel from './WarehousesPanel.jsx';
 import AccountPanel from './AccountPanel.jsx';
 import OrganizationPanel from './OrganizationPanel.jsx';
@@ -303,7 +304,8 @@ function App() {
       </aside>
       <div className="content-shell"><header className="topbar"><div><div className="topbar-kicker">TITO POS / {menu.find(m=>m.key===page)?.label.toUpperCase()||'MÁS'}</div><strong>{user?.business_name || 'Mi negocio'}</strong></div><div className="top-right">{canApproveDiscounts&&pendingApprovals>0&&<button className="approval-top-action" type="button" onClick={()=>setPage('aprobaciones')}>🔔 {pendingApprovals} pendiente{pendingApprovals!==1?'s':''}</button>}<span className="connection"><i className={serverOk?'':'off'}/> {serverOk?'API conectada':'API por comprobar'}</span><button className="ghost mini" onClick={()=>refresh(true)} disabled={loading}>{loading?'Actualizando…':'↻ Actualizar'}</button></div></header>
       <main className="main-content">
-        {page==='inicio' && <><div className="section-intro"><div><p className="eyebrow">RESUMEN GENERAL</p><h2>Tu negocio, en orden.</h2><p className="muted">Productos y movimientos registrados en Tito POS.</p></div><button className="primary" onClick={()=>{setNewSaleRequest(n=>n+1);setPage('vender');}}>+ Nueva venta</button></div>
+        {page==='inicio' && isAdmin && <ManagementDashboard request={request} onNavigate={p=>{if(p==='trazabilidad')setTraceUnitId(null);setPage(p);}} onNewSale={()=>{setNewSaleRequest(n=>n+1);setPage('vender');}}/>}
+        {page==='inicio' && !isAdmin && <><div className="section-intro"><div><p className="eyebrow">RESUMEN GENERAL</p><h2>Tu negocio, en orden.</h2><p className="muted">Productos y movimientos registrados en Tito POS.</p></div><button className="primary" onClick={()=>{setNewSaleRequest(n=>n+1);setPage('vender');}}>+ Nueva venta</button></div>
           <div className="stats-grid"><Stat label="Productos listados" value={products.length} detail="API entrega máximo 1000" ico="▤"/><Stat label="Stock bajo (≤5)" value={critical.length} detail="Productos para revisar" ico="!" warning={critical.length>0}/><Stat label="Valor de inventario" value={pesos(stockValue)} detail="Estimado a precio de venta" ico="$"/><Stat label="Ventas de hoy" value={salesToday.length} detail="Hora local de Chile (últimas 100 ventas)" ico="✓"/></div>
           {isAdmin&&<FinancialSummary request={request} notify={notify}/>}
           <section className="panel"><div className="panel-heading"><div><h3>Atención al inventario</h3><p>Productos con cinco unidades o menos</p></div><button className="text-button" onClick={()=>setPage('inventario')}>Ver inventario →</button></div>{!loaded ? <Empty text="Cargando productos…"/> : critical.length===0 ? <Empty text="No se detecta stock bajo en el listado actual."/> : <div className="table-wrap"><table><thead><tr><th>Producto</th><th>Código</th><th>Stock</th></tr></thead><tbody>{critical.slice(0,8).map(p=><tr key={p.id}><td><strong>{p.name}</strong></td><td className="mono">{p.sku||p.barcode}</td><td><span className="pill amber">{qtyFormat(p.stock_qty)} {p.sale_unit}</span></td></tr>)}</tbody></table></div>}</section>

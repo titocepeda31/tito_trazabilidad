@@ -63,7 +63,7 @@ const menu = [
   { key: 'vender', label: 'Vender', ico: '▣' },
   { key: 'ventas', label: 'Ventas', ico: '◷' },
   { key: 'dte', label: 'Documentos tributarios', ico: '▤' },
-  { key: 'currency', label: 'CLP y UF', ico: '
+  { key: 'currency', label: 'CLP y UF', ico: '＄' },
   { key: 'devoluciones', label: 'Devoluciones', ico: '↩' },
   { key: 'garantias', label: 'Garantías', ico: '◇' },
   { key: 'servicio', label: 'Servicio técnico', ico: '⚒' },

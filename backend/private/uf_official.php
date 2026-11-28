@@ -78,10 +78,17 @@ function titoUfOfficialParseRange(string $raw,string $from,string $to):array{
 }
 function titoUfCoverage(PDO $db,int $biz,string $from,string $to):array{
     $days=titoUfDays($from,$to);
-    $s=$db->prepare('SELECT rate_on FROM business_uf_rates WHERE business_id=? AND rate_on BETWEEN ? AND ? GROUP BY rate_on');
-    $s->execute([$biz,$from,$to]);$stored=$s->fetchAll(PDO::FETCH_COLUMN);$s->closeCursor();
+    // Una fila por fecha: la última versión registrada, sin perder el historial.
+    // Ambas partes de la consulta están limitadas a la empresa autenticada.
+    $s=$db->prepare('SELECT r.id,r.rate_on,r.clp_per_uf,r.source_reference,r.created_at
+        FROM business_uf_rates r
+        JOIN (SELECT rate_on,MAX(id) AS latest_id FROM business_uf_rates WHERE business_id=? AND rate_on BETWEEN ? AND ? GROUP BY rate_on) latest
+        ON latest.latest_id=r.id AND latest.rate_on=r.rate_on
+        WHERE r.business_id=? ORDER BY r.rate_on ASC');
+    $s->execute([$biz,$from,$to,$biz]);$rates=$s->fetchAll(PDO::FETCH_ASSOC);$s->closeCursor();
+    $stored=array_column($rates,'rate_on');
     $missing=array_values(array_diff($days,$stored));
-    return ['from'=>$from,'to'=>$to,'days'=>count($days),'stored'=>count($days)-count($missing),'missing'=>$missing];
+    return ['from'=>$from,'to'=>$to,'days'=>count($days),'stored'=>count($rates),'missing'=>$missing,'rates'=>$rates];
 }
 function titoUfSyncRange(PDO $db,int $biz,int $uid,string $from,string $to,bool $refresh=false):array{
     $days=titoUfDays($from,$to);$before=titoUfCoverage($db,$biz,$from,$to);

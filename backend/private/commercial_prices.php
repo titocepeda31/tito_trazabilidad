@@ -42,7 +42,56 @@ function titoCommercialAttach(PDO $db,int $biz,array $products):array{
         $p['commercial_price']=$v;$p['price_unit']=$v['price_unit']??'CLP';$p['uf_sale_blocked']=$p['price_unit']==='UF';
     }unset($p);return $products;
 }
+// Cálculo referencial entero: unidad CLP al peso, UF a seis decimales.
+function titoCommercialRound(int $n,int $den):int{
+    return intdiv($n+intdiv($den,2),$den);
+}
+function titoCommercialAmount(string $unit,string $final,?string $rate):array{
+    if($unit==='CLP'){
+        $clp=integerPrice((int)$final);
+        if($rate===null)return ['clp'=>$clp,'uf'=>null];
+        $r=titoCurrencyScaled($rate,2,6);if($r<=0)fail('UF inválida.',422);
+        // CLP <= 1e9: multiply by 1e8 via quotient/remainder to fit signed 64-bit.
+        $uf=titoCommercialRound($clp*100000000,$r);
+        return ['clp'=>$clp,'uf'=>titoDraftDecimal($uf,6)];
+    }
+    if($rate===null)fail('No hay UF registrada para la fecha de operación.',409);
+    return ['clp'=>titoDraftUFReference($final,$rate),'uf'=>$final];
+}
 function registerCommercialPriceRoutes(RouteCollectorProxy $group):void{
+    $group->post('/currency/operation-preview',static function(Request $request,Response $response):Response{
+        $a=$request->getAttribute('currentUser');$biz=(int)$a['business_id'];$b=requestBody($request);
+        $db=db();$unit=$b['operation_unit']??null;
+        if(!is_string($unit))fail('Unidad de operación inválida.',422);
+        $day=titoUfRangeDay($b['date']??quoteToday());$items=$b['items']??null;
+        if(!is_array($items)||!array_is_list($items)||count($items)<1||count($items)>50)fail('Ingresa de 1 a 50 productos.',422);
+        $db->beginTransaction();try{
+            originLockCompany($db,$biz);titoCommercialAllowed($db,$biz,$unit);
+            $rate=titoCurrencyRate($db,$biz,$day);$r=$rate?(string)$rate['clp_per_uf']:null;
+            $st=$db->prepare('SELECT id,name,price_clp,sale_unit FROM products WHERE id=? AND business_id=? AND is_active=1');
+            $lines=[];$seen=[];$totalClp=0;$totalUf=0;$allUf=true;
+            foreach($items as $item){
+                if(!is_array($item)||filter_var($item['product_id']??null,FILTER_VALIDATE_INT)===false)fail('Producto inválido.',422);
+                $pid=(int)$item['product_id'];if($pid<1||isset($seen[$pid]))fail('Producto duplicado o inválido.',422);$seen[$pid]=true;
+                $st->execute([$pid,$biz]);$p=$st->fetch();$st->closeCursor();if(!$p)fail('Producto no disponible.',404);
+                $q=decimalQuantity($item['quantity']??null,false,$p['sale_unit']!=='unidad');
+                if((float)$q<=0)fail('Cantidad inválida.',422);
+                $v=titoCommercialLatest($db,$biz,$pid);
+                if($v&&$v['price_unit']==='CLP'&&(int)$v['reference_clp']!==(int)$p['price_clp'])$v=null;
+                $originalUnit=$v['price_unit']??'CLP';$final=$originalUnit==='CLP'?(string)(int)$p['price_clp']:(string)$v['final_amount'];
+                if($originalUnit==='UF'||$unit==='UF'){if(!$r)fail('No existe UF registrada para la fecha elegida.',409);}
+                $converted=titoCommercialAmount($originalUnit,$final,$r);
+                // Preserve original list price and rate; no arbitrary discounts in this preview.
+                $subClp=(int)round((float)$q*$converted['clp'],0,PHP_ROUND_HALF_UP);
+                $subUf=$converted['uf']===null?null:(int)round((float)$q*(float)$converted['uf']*1000000,0,PHP_ROUND_HALF_UP);
+                if($subClp<0||$subClp>1000000000000||$totalClp+$subClp>1000000000000)fail('Total demasiado grande.',422);
+                if($subUf===null)$allUf=false;else{if($subUf<0||$totalUf>PHP_INT_MAX-$subUf)fail('Total UF demasiado grande.',422);$totalUf+=$subUf;}
+                $totalClp+=$subClp;
+                $lines[]=['product_id'=>$pid,'name'=>$p['name'],'quantity'=>$q,'original_unit'=>$originalUnit,'original_final_amount'=>$final,'price_version_id'=>$v?(int)$v['id']:null,'unit_clp'=>$converted['clp'],'unit_uf'=>$converted['uf'],'subtotal_clp'=>$subClp,'subtotal_uf'=>$subUf===null?null:titoDraftDecimal($subUf,6)];
+            }
+            $db->rollBack();return respond($response,['operation_unit'=>$unit,'date'=>$day,'rate'=>$rate,'lines'=>$lines,'total_clp'=>$totalClp,'total_uf'=>$allUf?titoDraftDecimal($totalUf,6):null,'preview_only'=>true,'operational_enabled'=>false]);
+        }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
+    });
     $group->get('/products/{id:[0-9]+}/commercial-price-history',static function(Request $request,Response $response,array $args):Response{
         $a=adminOnly($request);$biz=(int)$a['business_id'];$pid=(int)$args['id'];
         $s=db()->prepare('SELECT id,price_unit,source_amount,source_basis,tax_treatment,final_amount,reference_clp,uf_rate_id,reference_date,actor_id,created_at FROM product_commercial_prices WHERE business_id=? AND product_id=? ORDER BY id DESC LIMIT 100');

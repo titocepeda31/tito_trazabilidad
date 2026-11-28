@@ -20,6 +20,15 @@ function titoCommercialPrepare(PDO $db,int $biz,mixed $raw,?int $pid=null):array
     }
     $day=null;$rid=null;$ref=(int)$p['final_amount'];
     if($p['price_unit']==='UF'){
+        // Fail closed if the database migration was only partially installed.
+        $guard=$db->query("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND TRIGGER_NAME IN ('tito_uf_catalog_block_sale_item','tito_uf_catalog_block_quote_item','tito_uf_catalog_block_legacy_update')");
+        $n=(int)$guard->fetchColumn();$guard->closeCursor();
+        if($n!==3)fail('SQL 040 incompleto: faltan las protecciones del catálogo UF.',503);
+        // An open legacy quote must remain convertible at its agreed CLP price.
+        if($pid!==null){
+            $open=dteOne($db,"SELECT q.id FROM quotes q JOIN quote_items i ON i.quote_id=q.id WHERE q.business_id=? AND i.product_id=? AND q.status IN ('draft','sent','accepted','reserved') LIMIT 1",[$biz,$pid]);
+            if($open)fail('El producto tiene una cotización abierta. Finalízala antes de cambiar su precio a UF.',409);
+        }
         $day=quoteToday();$rate=titoCurrencyRate($db,$biz,$day);
         if(!$rate)fail('Sin UF registrada para hoy. Sincroniza los valores antes de guardar.',409);
         $rid=(int)$rate['id'];$ref=titoDraftUFReference($p['final_amount'],(string)$rate['clp_per_uf']);
@@ -40,6 +49,7 @@ function titoCommercialAttach(PDO $db,int $biz,array $products):array{
         // Legacy CLP edits/imports supersede the old CLP price metadata, never UF.
         if($v&&$v['price_unit']==='CLP'&&(int)$v['reference_clp']!==(int)$p['price_clp'])$v=null;
         $p['commercial_price']=$v;$p['price_unit']=$v['price_unit']??'CLP';$p['uf_sale_blocked']=$p['price_unit']==='UF';
+        $p['tax_treatment']=$v['tax_treatment']??null;
     }unset($p);return $products;
 }
 // Cálculo referencial entero: unidad CLP al peso, UF a seis decimales.

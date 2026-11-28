@@ -106,6 +106,43 @@ function registerHabitualCreditRoutes(RouteCollectorProxy $group): void {
         $st=$db->prepare('SELECT id,name,phone,notes,client_type,rut,business_activity,address,commune,contact_name,billing_email,is_active,created_at FROM habitual_clients'.$where.' ORDER BY name,id LIMIT 25 OFFSET '.$offset);
         $st->execute($params);return respond($response,['clients'=>$st->fetchAll(),'total'=>$total,'page'=>$page,'pages'=>max(1,(int)ceil($total/25))]);
     });
+    // Historial por identidad de cliente; nunca inferir vínculos por nombre o RUT.
+    $group->get('/clients/commercial/{id:[0-9]+}/history',static function(Request $request,Response $response,array $args): Response {
+        $a=adminOnly($request);$biz=(int)$a['business_id'];$cid=(int)$args['id'];$db=db();$q=$request->getQueryParams();
+        $tab=$q['tab']??'quotes';$page=filter_var($q['page']??1,FILTER_VALIDATE_INT,['options'=>['min_range'=>1,'max_range'=>100000]]);
+        if(!is_string($tab)||!in_array($tab,['quotes','reservations','sales','products','series','returns','assessments'],true)||$page===false)fail('Filtro inválido.',422);
+        $s=$db->prepare('SELECT id,name,rut,is_active FROM habitual_clients WHERE business_id=? AND id=?');$s->execute([$biz,$cid]);$client=$s->fetch();$s->closeCursor();if(!$client)fail('Cliente no encontrado.',404);
+        // Para ventas históricas sin client_id, usar únicamente un vínculo explícito existente (serie o cuenta de crédito).
+        $saleScope="s.business_id=? AND (s.client_id=? OR (s.client_id IS NULL AND (EXISTS(SELECT 1 FROM serial_sale_snapshots ss WHERE ss.business_id=s.business_id AND ss.sale_id=s.id AND ss.client_id=?) OR EXISTS(SELECT 1 FROM credit_accounts ca WHERE ca.business_id=s.business_id AND ca.sale_id=s.id AND ca.client_id=?))))";
+        $params=[$biz,$cid,$cid,$cid];$offset=($page-1)*25;
+        switch($tab){
+            case 'quotes':
+                $sql="SELECT q.id,q.created_at,q.valid_until,q.status,q.total_clp,q.converted_sale_id,(SELECT r.expires_on FROM serial_reservations r WHERE r.business_id=q.business_id AND r.quote_id=q.id AND r.status='pending' ORDER BY r.id DESC LIMIT 1) AS reservation_expires_on FROM quotes q WHERE q.business_id=? AND q.client_id=? ORDER BY q.id DESC";
+                $params=[$biz,$cid];break;
+            case 'reservations':
+                $sql="SELECT r.id,r.quote_id,r.created_at,r.status,r.expires_on,r.sale_id,w.name AS warehouse_name,(SELECT COUNT(*) FROM serial_reservation_items i WHERE i.business_id=r.business_id AND i.reservation_id=r.id AND i.quantity>i.dispatched_quantity) AS remaining_lines FROM serial_reservations r LEFT JOIN warehouses w ON w.id=r.warehouse_id AND w.business_id=r.business_id WHERE r.business_id=? AND r.client_id=? ORDER BY r.id DESC";
+                $params=[$biz,$cid];break;
+            case 'sales':
+                $sql="SELECT s.id,s.created_at,s.status,s.total_clp,s.payment_method,w.name AS warehouse_name,COALESCE(d.quote_id,(SELECT q.id FROM quotes q WHERE q.business_id=s.business_id AND q.converted_sale_id=s.id ORDER BY q.id DESC LIMIT 1)) AS quote_id,d.reservation_id FROM sales s LEFT JOIN warehouses w ON w.id=s.warehouse_id AND w.business_id=s.business_id LEFT JOIN quote_dispatches d ON d.sale_id=s.id AND d.business_id=s.business_id WHERE ".$saleScope." ORDER BY s.id DESC";
+                break;
+            case 'products':
+                $sql="SELECT si.id,si.sale_id,s.created_at,s.status AS sale_status,si.product_id,COALESCE(si.product_name_snapshot,p.name) AS product_name,p.sku,si.quantity,si.unit_price_clp,si.subtotal_clp,(SELECT COALESCE(SUM(ri.quantity),0) FROM customer_return_items ri JOIN customer_returns cr ON cr.id=ri.return_id AND cr.business_id=s.business_id AND cr.sale_id=s.id WHERE ri.sale_item_id=si.id) AS returned_quantity FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id AND p.business_id=s.business_id WHERE ".$saleScope." ORDER BY s.id DESC,si.id DESC";
+                break;
+            case 'series':
+                $sql="SELECT su.unit_id,su.sale_id,s.created_at,s.status AS sale_status,x.serial_number,x.product_id,COALESCE(si.product_name_snapshot,p.name) AS product_name,rv.reversal_kind,rv.return_id FROM serial_sale_units su JOIN sales s ON s.id=su.sale_id AND s.business_id=su.business_id JOIN serial_units x ON x.id=su.unit_id AND x.business_id=su.business_id JOIN sale_items si ON si.id=su.sale_item_id AND si.sale_id=s.id JOIN products p ON p.id=x.product_id AND p.business_id=su.business_id LEFT JOIN serial_sale_reversals rv ON rv.unit_id=su.unit_id AND rv.sale_id=su.sale_id AND rv.business_id=su.business_id WHERE ".$saleScope." ORDER BY s.id DESC,su.unit_id DESC";
+                break;
+            case 'returns':
+                $sql="SELECT r.id,r.sale_id,r.created_at,r.return_kind,r.item_condition,r.resolution,r.reason,r.amount_clp,r.refund_status FROM customer_returns r JOIN sales s ON s.id=r.sale_id AND s.business_id=r.business_id WHERE ".$saleScope." ORDER BY r.id DESC";
+                break;
+            case 'assessments':
+                $sql="SELECT a.id,a.sale_id,a.created_at,a.outcome,a.observations,a.custody FROM customer_return_assessments a JOIN sales s ON s.id=a.sale_id AND s.business_id=a.business_id WHERE ".$saleScope." ORDER BY a.id DESC";
+                break;
+        }
+        $s=$db->prepare($sql.' LIMIT 26 OFFSET '.$offset);$s->execute($params);$rows=$s->fetchAll();$s->closeCursor();$more=count($rows)>25;$rows=array_slice($rows,0,25);
+        if($tab==='quotes')$rows=array_map('quoteEffective',$rows);
+        if($tab==='reservations')$rows=array_map('reservationEffective',$rows);
+        return respond($response,['client'=>$client,'tab'=>$tab,'rows'=>$rows,'page'=>$page,'more'=>$more]);
+    });
     $group->post('/clients/commercial',static function(Request $request,Response $response): Response {
         $admin=adminOnly($request);$fields=titoCommercialFields(requestBody($request));$db=db();
         try{

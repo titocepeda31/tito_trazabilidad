@@ -110,12 +110,15 @@ function registerHabitualCreditRoutes(RouteCollectorProxy $group): void {
     $group->get('/clients/commercial/{id:[0-9]+}/history',static function(Request $request,Response $response,array $args): Response {
         $a=adminOnly($request);$biz=(int)$a['business_id'];$cid=(int)$args['id'];$db=db();$q=$request->getQueryParams();
         $tab=$q['tab']??'quotes';$page=filter_var($q['page']??1,FILTER_VALIDATE_INT,['options'=>['min_range'=>1,'max_range'=>100000]]);
-        if(!is_string($tab)||!in_array($tab,['quotes','reservations','sales','products','series','returns','assessments','followups'],true)||$page===false)fail('Filtro inválido.',422);
+        if(!is_string($tab)||!in_array($tab,['quotes','reservations','sales','products','series','returns','assessments','followups','receivables'],true)||$page===false)fail('Filtro inválido.',422);
         $s=$db->prepare('SELECT id,name,rut,is_active FROM habitual_clients WHERE business_id=? AND id=?');$s->execute([$biz,$cid]);$client=$s->fetch();$s->closeCursor();if(!$client)fail('Cliente no encontrado.',404);
         // Para ventas históricas sin client_id, usar únicamente un vínculo explícito existente (serie o cuenta de crédito).
         $saleScope="s.business_id=? AND (s.client_id=? OR (s.client_id IS NULL AND (EXISTS(SELECT 1 FROM serial_sale_snapshots ss WHERE ss.business_id=s.business_id AND ss.sale_id=s.id AND ss.client_id=?) OR EXISTS(SELECT 1 FROM credit_accounts ca WHERE ca.business_id=s.business_id AND ca.sale_id=s.id AND ca.client_id=?))))";
         $params=[$biz,$cid,$cid,$cid];$offset=($page-1)*25;
         switch($tab){
+            case 'receivables':
+                $sql=titoCreditAccountListSql().' WHERE a.business_id=? AND a.client_id=? ORDER BY a.id DESC';
+                $params=[$biz,$cid];break;
             case 'followups':
                 $sql="SELECT f.id,f.quote_id,f.kind,f.channel,f.note,f.status,f.due_on,f.created_at,f.close_note,u.email AS assigned_email FROM quote_followups f JOIN quotes q ON q.id=f.quote_id AND q.business_id=f.business_id AND q.client_id=f.client_id JOIN users u ON u.id=f.assigned_to AND u.business_id=f.business_id WHERE f.business_id=? AND f.client_id=? ORDER BY f.id DESC";
                 $params=[$biz,$cid];break;

@@ -80,9 +80,13 @@ function importProducts(PDO $db,int $businessId,int $userId,array $input): array
         // Replays must return the original result even if the current fiscal configuration has changed.
         $prior->execute([$businessId,$importId,$chunk]);$recorded=$prior->fetchColumn();$prior->closeCursor();
         if($recorded!==false){$result=$respondPrior();$db->commit();return $result;}
+        $first=$db->prepare('SELECT result_json FROM product_import_chunks WHERE business_id=? AND import_id=? ORDER BY chunk_index LIMIT 1');$first->execute([$businessId,$importId]);$started=$first->fetchColumn();$first->closeCursor();
+        if($started!==false){
+            $previous=json_decode((string)$started,true,16,JSON_THROW_ON_ERROR);
+            if(array_key_exists('price_audit',$previous)!==($taxMode===1))fail('No se puede cambiar el modo de precios de una importación iniciada. Reintenta la solicitud original.',409);
+        }
         if($taxMode===null){
-            $legacy=$db->prepare('SELECT 1 FROM product_import_chunks WHERE business_id=? AND import_id=? LIMIT 1');$legacy->execute([$businessId,$importId]);$started=$legacy->fetchColumn();$legacy->closeCursor();
-            if(!$started)fail('Actualiza el importador y confirma si los precios incluyen IVA antes de iniciar una carga nueva.',422);
+            if($started===false)fail('Actualiza el importador y confirma si los precios incluyen IVA antes de iniciar una carga nueva.',422);
         }else{
             $cfg=dteConfig($db,$businessId);if($cfg&&$cfg['price_basis']==='net')fail('La empresa está configurada con precios netos. Revisa la configuración tributaria y los precios existentes antes de cargar precios finales. No se modificó este lote.',409);
         }

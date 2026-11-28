@@ -2,6 +2,7 @@ import React,{useEffect,useMemo,useState} from 'react';
 import {newId,pesos} from './api.js';
 import CreditOperationsPanel from './CreditOperationsPanel.jsx';
 import CommercialClientsPanel from './CommercialClientsPanel.jsx';
+import ClientImportPanel from './ClientImportPanel.jsx';
 
 const pendingKey='tito_pending_credit_payment';
 const methodNames={efectivo:'Efectivo',transferencia:'Transferencia',tarjeta:'Tarjeta',otro:'Otro'};
@@ -15,8 +16,9 @@ export default function ClientsPanel(props){
   const [tab,setTab]=useState('commercial'),[editing,setEditing]=useState(false);
   return <>{!editing&&!props.createForSale&&<div className="role-nav" aria-label="Gestión de clientes">
     <button type="button" className={tab==='commercial'?'primary':'ghost'} onClick={()=>setTab('commercial')}>Clientes</button>
+    <button type="button" className={tab==='import'?'primary':'ghost'} onClick={()=>setTab('import')}>Importar clientes</button>
     <button type="button" className={tab==='credit'?'primary':'ghost'} onClick={()=>setTab('credit')}>Crédito heredado</button>
-  </div>}{tab==='commercial'?<CommercialClientsPanel {...props} onEditingChange={setEditing}/>:<LegacyCreditPanel {...props}/>}</>;
+  </div>}{props.createForSale||tab==='commercial'?<CommercialClientsPanel {...props} onEditingChange={setEditing}/>:tab==='import'?<ClientImportPanel {...props} onBack={()=>setTab('commercial')}/>:<LegacyCreditPanel {...props}/>}</>;
 }
 function LegacyCreditPanel({request,notify,onChange}){
   const [clients,setClients]=useState([]);

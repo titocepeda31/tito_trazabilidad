@@ -34,6 +34,7 @@ require __DIR__ . '/../private/traceability.php';
 require __DIR__ . '/../private/management_dashboard.php';
 require __DIR__ . '/../private/pilot_setup.php';
 require __DIR__ . '/../private/habitual_credit.php';
+require __DIR__ . '/../private/client_import.php';
 require __DIR__ . '/../private/credit_operations.php';
 require __DIR__ . '/../private/product_creations.php';
 require __DIR__ . '/../private/warehouses.php';
@@ -387,6 +388,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
     registerReplacementWarrantyRoutes($group);
     registerWarrantyRoutes($group);
     registerHabitualCreditRoutes($group);
+    registerClientImportRoutes($group);
     registerCreditOperationsRoutes($group);
     registerProductCreationAuditRoutes($group);
     registerWarehouseRoutes($group);

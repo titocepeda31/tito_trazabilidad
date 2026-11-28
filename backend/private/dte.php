@@ -30,7 +30,7 @@ function dteSaleSnapshot(PDO $db,int $biz,int $sale,int $type,array $config):arr
         if($s['current_name']===null)fail('Ficha de cliente no disponible.',409);
         $recipient=['client_id'=>(int)$s['client_id'],'name'=>$s['current_name'],'rut'=>$rut,'business_activity'=>$s['business_activity'],'address'=>$s['address'],'commune'=>$s['commune'],'billing_email'=>$s['billing_email'],'sale_name_snapshot'=>$s['client_name_snapshot'],'sale_rut_snapshot'=>$s['client_rut_snapshot']];
     }
-    if($type===33){
+    if(in_array($type,[33,34],true)){
         if(!$recipient||!$recipient['rut']||!trim((string)$recipient['name'])||!trim((string)$recipient['business_activity'])||!trim((string)$recipient['address'])||!trim((string)$recipient['commune']))fail('Factura: completa RUT, razón social/nombre, giro, dirección y comuna del cliente.',422);
         if($recipient['sale_rut_snapshot']===null)fail('Venta sin RUT histórico: confirmar identidad tributaria antes de preparar factura.',409);
     }
@@ -83,7 +83,7 @@ function registerDteRoutes(RouteCollectorProxy $group):void{
         return respond($response,$result+['environment'=>'development','production_enabled'=>false]);
     });
     $group->get('/dte/documents',static function(Request $request,Response $response):Response{
-        $a=adminOnly($request);$biz=(int)$a['business_id'];$p=$request->getQueryParams();$page=filter_var($p['page']??1,FILTER_VALIDATE_INT,['options'=>['min_range'=>1,'max_range'=>100000]]);$sale=originId($p['sale_id']??null,'sale_id');
+        $a=adminOnly($request);$biz=(int)$a['business_id'];$p=$request->getQueryParams();$page=filter_var($p['page']??1,FILTER_VALIDATE_INT,['options'=>['min_range'=>1,'max_range'=>100000]]);$sale=null;if(isset($p['sale_id'])){$sale=filter_var($p['sale_id'],FILTER_VALIDATE_INT,['options'=>['min_range'=>1]]);if($sale===false)fail('Venta inválida.',422);}
         if($page===false)fail('Página inválida.',422);
         $sql='SELECT d.id,d.sale_id,d.document_type,d.status,d.commercial_total_clp,d.created_at,d.discarded_at,d.discard_reason,s.status AS sale_status FROM dte_documents d JOIN sales s ON s.id=d.sale_id AND s.business_id=d.business_id WHERE d.business_id=?';$args=[$biz];if($sale!==null){$sql.=' AND d.sale_id=?';$args[]=$sale;}
         $s=db()->prepare($sql.' ORDER BY d.id DESC LIMIT 26 OFFSET '.(($page-1)*25));$s->execute($args);$rows=$s->fetchAll();$s->closeCursor();return respond($response,['rows'=>array_slice($rows,0,25),'more'=>count($rows)>25]);
@@ -96,7 +96,7 @@ function registerDteRoutes(RouteCollectorProxy $group):void{
         $a=adminOnly($request);$biz=(int)$a['business_id'];$uid=(int)$a['id'];$b=requestBody($request);
         if(array_diff(array_keys($b),['request_id','sale_id','document_type','config_id']))fail('Campos no permitidos.',422);
         $rid=titoCreditUuid($b['request_id']??null);$sale=originId($b['sale_id']??null,'sale_id');$cid=originId($b['config_id']??null,'config_id');$type=$b['document_type']??null;
-        if(!$sale||!$cid||!in_array($type,[33,39],true))fail('Selecciona venta y factura o boleta.',422);
+        if(!$sale||!$cid||!in_array($type,[33,34,39,41],true))fail('Selecciona venta y factura o boleta.',422);
         $hash=hash('sha256',json_encode([$uid,$sale,$cid,$type],JSON_THROW_ON_ERROR));$db=db();$db->beginTransaction();try{originLockCompany($db,$biz);
             $old=dteOne($db,'SELECT id,payload_hash FROM dte_documents WHERE business_id=? AND request_id=?',[$biz,$rid]);if($old){if(!hash_equals($old['payload_hash'],$hash))fail('Solicitud reutilizada.',409);$db->commit();return respond($response,['ok'=>true,'document_id'=>(int)$old['id'],'already_recorded'=>true]);}
             $config=dteConfig($db,$biz);if(!$config||(int)$config['id']!==$cid)fail('Actualiza la configuración tributaria.',409);

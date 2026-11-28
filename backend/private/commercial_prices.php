@@ -4,7 +4,17 @@ use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 use Slim\Routing\RouteCollectorProxy;
 
+function titoCommercialTableExists(PDO $db):bool{
+    $s=$db->query("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='product_commercial_prices'");
+    $ok=(int)$s->fetchColumn()===1;$s->closeCursor();return $ok;
+}
+function titoCommercialReady(PDO $db):bool{
+    if(!titoCommercialTableExists($db))return false;
+    $s=$db->query("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND TRIGGER_NAME IN ('tito_uf_catalog_block_sale_item','tito_uf_catalog_block_quote_item','tito_uf_catalog_block_legacy_update')");
+    $ok=(int)$s->fetchColumn()===3;$s->closeCursor();return $ok;
+}
 function titoCommercialLatest(PDO $db,int $biz,int $pid):?array{
+    if(!titoCommercialTableExists($db))return null;
     return dteOne($db,'SELECT id,price_unit,source_amount,source_basis,tax_treatment,final_amount,reference_clp,uf_rate_id,reference_date FROM product_commercial_prices WHERE business_id=? AND product_id=? ORDER BY id DESC LIMIT 1',[$biz,$pid]);
 }
 function titoCommercialAllowed(PDO $db,int $biz,string $unit):void{
@@ -13,6 +23,7 @@ function titoCommercialAllowed(PDO $db,int $biz,string $unit):void{
 }
 function titoCommercialPrepare(PDO $db,int $biz,mixed $raw,?int $pid=null):array{
     if(!is_array($raw)||array_is_list($raw))fail('Precio comercial inválido.',422);
+    if(!titoCommercialReady($db))fail('Primero instala completamente el SQL 040.',503);
     $p=titoDraftPrice($raw);titoCommercialAllowed($db,$biz,$p['price_unit']);
     if($pid!==null){
         $policy=dteTaxPolicy($db,$biz,$pid,quoteToday());
@@ -20,10 +31,6 @@ function titoCommercialPrepare(PDO $db,int $biz,mixed $raw,?int $pid=null):array
     }
     $day=null;$rid=null;$ref=(int)$p['final_amount'];
     if($p['price_unit']==='UF'){
-        // Fail closed if the database migration was only partially installed.
-        $guard=$db->query("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND TRIGGER_NAME IN ('tito_uf_catalog_block_sale_item','tito_uf_catalog_block_quote_item','tito_uf_catalog_block_legacy_update')");
-        $n=(int)$guard->fetchColumn();$guard->closeCursor();
-        if($n!==3)fail('SQL 040 incompleto: faltan las protecciones del catálogo UF.',503);
         // An open legacy quote must remain convertible at its agreed CLP price.
         if($pid!==null){
             $open=dteOne($db,"SELECT q.id FROM quotes q JOIN quote_items i ON i.quote_id=q.id WHERE q.business_id=? AND i.product_id=? AND q.status IN ('draft','sent','accepted','reserved') LIMIT 1",[$biz,$pid]);
@@ -42,6 +49,7 @@ function titoCommercialRecord(PDO $db,int $biz,int $pid,int $uid,array $p):int{
 }
 function titoCommercialAttach(PDO $db,int $biz,array $products):array{
     if(!$products)return [];
+    if(!titoCommercialTableExists($db))return $products;
     $st=$db->prepare('SELECT p.id,p.product_id,p.price_unit,p.source_amount,p.source_basis,p.tax_treatment,p.final_amount,p.reference_clp,p.uf_rate_id,p.reference_date FROM product_commercial_prices p JOIN (SELECT product_id,MAX(id) id FROM product_commercial_prices WHERE business_id=? GROUP BY product_id) latest ON latest.id=p.id WHERE p.business_id=?');
     $st->execute([$biz,$biz]);$by=[];foreach($st->fetchAll() as $p)$by[(int)$p['product_id']]=$p;$st->closeCursor();
     foreach($products as &$p){
@@ -113,6 +121,7 @@ function registerCommercialPriceRoutes(RouteCollectorProxy $group):void{
     });
     $group->get('/products/{id:[0-9]+}/commercial-price-history',static function(Request $request,Response $response,array $args):Response{
         $a=adminOnly($request);$biz=(int)$a['business_id'];$pid=(int)$args['id'];
+        if(!titoCommercialTableExists(db()))return respond($response,['versions'=>[]]);
         $s=db()->prepare('SELECT id,price_unit,source_amount,source_basis,tax_treatment,final_amount,reference_clp,uf_rate_id,reference_date,actor_id,created_at FROM product_commercial_prices WHERE business_id=? AND product_id=? ORDER BY id DESC LIMIT 100');
         $s->execute([$biz,$pid]);return respond($response,['versions'=>$s->fetchAll()]);
     });

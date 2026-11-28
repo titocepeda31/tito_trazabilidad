@@ -19,6 +19,7 @@ import SerialOpeningPanel from './SerialOpeningPanel.jsx';
 import PilotSetupPanel from './PilotSetupPanel.jsx';
 import DtePanel from './DtePanel.jsx';
 import CurrencyPanel from './CurrencyPanel.jsx';
+import {ProductPriceDraftEntry} from './ProductPriceDraftPanel.jsx';
 import WarehousesPanel from './WarehousesPanel.jsx';
 import AccountPanel from './AccountPanel.jsx';
 import OrganizationPanel from './OrganizationPanel.jsx';
@@ -320,14 +321,14 @@ function App() {
           {isAdmin&&<FinancialSummary request={request} notify={notify}/>}
           <section className="panel"><div className="panel-heading"><div><h3>Atención al inventario</h3><p>Productos con cinco unidades o menos</p></div><button className="text-button" onClick={()=>setPage('inventario')}>Ver inventario →</button></div>{!loaded ? <Empty text="Cargando productos…"/> : critical.length===0 ? <Empty text="No se detecta stock bajo en el listado actual."/> : <div className="table-wrap"><table><thead><tr><th>Producto</th><th>Código</th><th>Stock</th></tr></thead><tbody>{critical.slice(0,8).map(p=><tr key={p.id}><td><strong>{p.name}</strong></td><td className="mono">{p.sku||p.barcode}</td><td><span className="pill amber">{qtyFormat(p.stock_qty)} {p.sale_unit}</span></td></tr>)}</tbody></table></div>}</section>
         </>}
-        {page==='inventario' && <Inventory products={products} onChange={()=>refresh(false)} request={request} notify={notify} canManage={isAdmin} onOpenHistory={()=>setPage('auditoria')} />}
+        {page==='inventario' && <>{isAdmin&&<ProductPriceDraftEntry request={request} mode="manual"/>}<Inventory products={products} onChange={()=>refresh(false)} request={request} notify={notify} canManage={isAdmin} onOpenHistory={()=>setPage('auditoria')} /></>}
         {page==='auditoria' && isAdmin && <InventoryHistory request={request} notify={notify} products={products} onBack={()=>setPage('inventario')} />}
         {page==='dte' && isAdmin && <DtePanel request={request} notify={notify} onNavigate={setPage}/>}
         {page==='currency' && isAdmin && <CurrencyPanel request={request}/>}
         {page==='preparacion' && isAdmin && <PilotSetupPanel request={request} onNavigate={p=>{if(p==='trazabilidad')setTraceUnitId(null);setPage(p);}}/>}
         {page==='apertura' && isAdmin && <SerialOpeningPanel request={request} notify={notify} onChange={()=>refresh(false)}/>}
         {page==='etiquetas' && isAdmin && <LabelsPanel request={request}/>}
-        {page==='importar' && <ImportPanel request={request} refresh={()=>refresh(false)} notify={notify} />}
+        {page==='importar' && <>{isAdmin&&<ProductPriceDraftEntry request={request} mode="file"/>}<ImportPanel request={request} refresh={()=>refresh(false)} notify={notify} /></>}
         {page==='recepciones' && isAdmin && <ReceiptsPanel products={products} request={request} onChange={()=>refresh(false)} notify={notify} />}
         {page==='bodegas' && isAdmin && <WarehousesPanel request={request} notify={notify} onChange={()=>refresh(false)} />}
         {page==='terminal' && <TerminalPanel request={request} notify={notify} isAdmin={isAdmin} onActivated={activated=>{setTerminalStatus(null);setTerminalVersion(n=>n+1);if(activated)setPage('vender');}} />}

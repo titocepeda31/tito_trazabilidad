@@ -41,7 +41,8 @@ END//
 CREATE TRIGGER tito_uf_catalog_block_legacy_update BEFORE UPDATE ON products
 FOR EACH ROW
 BEGIN
- IF NEW.price_clp<>OLD.price_clp AND COALESCE((SELECT price_unit FROM product_commercial_prices WHERE business_id=OLD.business_id AND product_id=OLD.id ORDER BY id DESC LIMIT 1),'CLP')='UF' THEN
+ IF NEW.price_clp<>OLD.price_clp AND COALESCE((SELECT price_unit FROM product_commercial_prices WHERE business_id=OLD.business_id AND product_id=OLD.id ORDER BY id DESC LIMIT 1),'CLP')='UF'
+ AND NEW.price_clp<>COALESCE((SELECT reference_clp FROM product_commercial_prices WHERE business_id=OLD.business_id AND product_id=OLD.id ORDER BY id DESC LIMIT 1),OLD.price_clp) THEN
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Producto UF: cambia la unidad o el precio desde el catálogo comercial.';
  END IF;
 END//

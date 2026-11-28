@@ -10,6 +10,7 @@ import InventoryHistory from './InventoryHistory.jsx';
 import QuotesPanel from './QuotesPanel.jsx';
 import ReturnsPanel from './ReturnsPanel.jsx';
 import ServiceCasesPanel from './ServiceCasesPanel.jsx';
+import WarrantiesPanel from './WarrantiesPanel.jsx';
 import ClientsPanel from './ClientsPanel.jsx';
 import FinancialSummary from './FinancialSummary.jsx';
 import WarehousesPanel from './WarehousesPanel.jsx';
@@ -52,6 +53,7 @@ const menu = [
   { key: 'vender', label: 'Vender', ico: '▣' },
   { key: 'ventas', label: 'Ventas', ico: '◷' },
   { key: 'devoluciones', label: 'Devoluciones', ico: '↩' },
+  { key: 'garantias', label: 'Garantías', ico: '◇' },
   { key: 'servicio', label: 'Servicio técnico', ico: '⚒' },
   { key: 'clientes', label: 'Clientes', ico: '♧' },
   { key: 'cotizaciones', label: 'Cotizar', ico: '▤' },
@@ -269,7 +271,7 @@ function App() {
   const pendingApprovals=approvalRequests.filter(r=>r.status==='pending').length;
   const canApproveDiscounts=isAdmin||staffPermissions.can_approve_discounts;
   const canSellCredit=isAdmin||staffPermissions.can_sell_credit;
-  const visibleMenu = isAdmin ? menu : menu.filter(m => !['importar','usuarios','recepciones','cotizaciones','bodegas','devoluciones','servicio','clientes','organizacion','roles','puntosventa','origen','series'].includes(m.key) && (m.key!=='aprobaciones'||canApproveDiscounts));
+  const visibleMenu = isAdmin ? menu : menu.filter(m => !['importar','usuarios','recepciones','cotizaciones','bodegas','devoluciones','servicio','garantias','clientes','organizacion','roles','puntosventa','origen','series'].includes(m.key) && (m.key!=='aprobaciones'||canApproveDiscounts));
   const critical = products.filter(p => Number(p.stock_qty) <= 5);
   const stockValue = products.reduce((total,p) => total + Number(p.stock_qty) * Number(p.price_clp), 0);
   const dateCL = d => d.toLocaleDateString('sv-SE', {timeZone:'America/Santiago'});
@@ -336,6 +338,7 @@ function App() {
         {page==='roles' && isAdmin && <RolesPanel request={request} />}
         {page==='cuenta' && <AccountPanel user={user} request={request} notify={notify} onPasswordChanged={()=>{endSession();setPage('inicio');notify('Contraseña actualizada. Inicia sesión nuevamente.','success');}} />}
         {page==='ventas' && <SalesPanel sales={sales} onRefresh={()=>refresh(true)} request={request} notify={notify} canVoid={isAdmin} onStartReturn={id=>{setReturnSaleId(id);setPage('devoluciones');}} businessName={user?.business_name||'Tito POS'} />}
+        {page==='garantias' && isAdmin && <WarrantiesPanel request={request} notify={notify}/>}
         {page==='servicio' && isAdmin && <ServiceCasesPanel request={request} notify={notify}/>}
         {page==='devoluciones' && isAdmin && <ReturnsPanel sales={sales} request={request} notify={notify} initialSaleId={returnSaleId} onChange={()=>refresh(false)} />}
         {page==='clientes' && isAdmin && <ClientsPanel request={request} notify={notify} onChange={()=>refresh(false)} createForSale={creatingSaleClient} onSaleClientDone={c=>{setCreatingSaleClient(false);if(c)setSaleClientResult(c);setPage('vender');}} />}

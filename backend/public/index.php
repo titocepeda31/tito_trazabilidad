@@ -26,6 +26,7 @@ require __DIR__ . '/../private/inventory_reports.php';
 require __DIR__ . '/../private/quotes.php';
 require __DIR__ . '/../private/customer_returns.php';
 require __DIR__ . '/../private/service_cases.php';
+require __DIR__ . '/../private/warranties.php';
 require __DIR__ . '/../private/habitual_credit.php';
 require __DIR__ . '/../private/credit_operations.php';
 require __DIR__ . '/../private/product_creations.php';
@@ -318,6 +319,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
             $st->execute([$total,$saleId,$biz]);
             titoCashRegisterSale($db,$biz,$uid,$cashSessionId,$saleId,$requestId,$total,$payment);
             if($reservationId!==null)reservationComplete($db,$biz,$reservationId,$saleId,$uid);
+            warrantyRecordSale($db,$biz,$saleId,$clientId);
             $db->commit();
             return respond($response,['ok'=>true,'sale_id'=>$saleId,'total_clp'=>$total,'warehouse_id'=>$saleLocation],201);
         }catch(Throwable $e){
@@ -368,6 +370,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
     registerQuoteRoutes($group);
     registerCustomerReturnRoutes($group);
     registerServiceRoutes($group);
+    registerWarrantyRoutes($group);
     registerHabitualCreditRoutes($group);
     registerCreditOperationsRoutes($group);
     registerProductCreationAuditRoutes($group);

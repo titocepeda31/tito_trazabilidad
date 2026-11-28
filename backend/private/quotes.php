@@ -652,6 +652,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
                 $s->execute([$biz,$qid,$resId,$sid,$uid,$dispatchRequest,$dispatchHash,$total]);
                 if($isFinal)reservationComplete($db,$biz,$resId,$sid,$uid);
             }
+            warrantyRecordSale($db,$biz,$sid,$quote['client_id']===null?null:(int)$quote['client_id']);
             quoteEvent($db,$biz,$qid,$uid,$isFinal?'converted':'partial_dispatch',$from,$to,null,['sale_id'=>$sid,'reservation_id'=>$resId,'total_clp'=>$total,'warehouse_id'=>$saleLocation,'payment_method'=>$payment,'credit_account_id'=>$accountId,'due_date'=>$due,'initial_payment_clp'=>$initial,'advance_applied_clp'=>$advance,'serial_items'=>$series,'items'=>array_map(static fn($i)=>['product_id'=>$i['product_id'],'quantity'=>$i['quantity'],'subtotal_clp'=>$i['subtotal_clp']],$items)],$dispatchRequest,$dispatchHash??$conversionHash);
             $db->commit();
             return respond($response,['ok'=>true,'quote_id'=>$qid,'sale_id'=>$sid,'total_clp'=>$total,'warehouse_id'=>$saleLocation,'complete'=>$isFinal,'credit_account_id'=>$accountId,'balance_clp'=>$credit?$total-$initial-$advance:0],201);

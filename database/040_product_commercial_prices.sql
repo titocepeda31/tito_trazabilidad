@@ -1,5 +1,7 @@
 -- 040: catálogo de precios comerciales CLP/UF e historial.
--- Aplicar una sola vez en phpMyAdmin después de 038 y 039, con respaldo previo.
+-- Seleccionar maderas7_ttrazabilidad en phpMyAdmin antes de importar; aplicar después de 038/039 con respaldo.
+-- Nombres explícitos de esquema para evitar crear triggers en information_schema.
+-- Si falló una instalación anterior, comprobar SHOW TRIGGERS FROM maderas7_ttrazabilidad antes de repetir.
 -- Esta etapa habilita el catálogo; ventas y cotizaciones UF siguen bloqueadas.
 -- Si una sentencia falla, no volver a ejecutar todo: revisar tabla y triggers existentes.
 -- El backend exige los tres triggers antes de habilitar el formulario comercial.
@@ -25,27 +27,26 @@ CREATE TABLE IF NOT EXISTS maderas7_ttrazabilidad.product_commercial_prices (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 -- Bloqueo transitorio a nivel de BD para TODOS los caminos legacy, incluidos crédito y descuentos.
 -- Quitar únicamente cuando todas las escrituras exijan snapshots comerciales de la operación.
-USE maderas7_ttrazabilidad;
 DELIMITER //
-CREATE TRIGGER tito_uf_catalog_block_sale_item BEFORE INSERT ON sale_items
+CREATE TRIGGER maderas7_ttrazabilidad.tito_uf_catalog_block_sale_item BEFORE INSERT ON maderas7_ttrazabilidad.sale_items
 FOR EACH ROW
 BEGIN
- IF COALESCE((SELECT price_unit FROM product_commercial_prices WHERE product_id=NEW.product_id ORDER BY id DESC LIMIT 1),'CLP')='UF' THEN
+ IF COALESCE((SELECT price_unit FROM maderas7_ttrazabilidad.product_commercial_prices WHERE product_id=NEW.product_id ORDER BY id DESC LIMIT 1),'CLP')='UF' THEN
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Producto UF: venta pendiente de integración comercial.';
  END IF;
 END//
-CREATE TRIGGER tito_uf_catalog_block_quote_item BEFORE INSERT ON quote_items
+CREATE TRIGGER maderas7_ttrazabilidad.tito_uf_catalog_block_quote_item BEFORE INSERT ON maderas7_ttrazabilidad.quote_items
 FOR EACH ROW
 BEGIN
- IF COALESCE((SELECT price_unit FROM product_commercial_prices WHERE product_id=NEW.product_id ORDER BY id DESC LIMIT 1),'CLP')='UF' THEN
+ IF COALESCE((SELECT price_unit FROM maderas7_ttrazabilidad.product_commercial_prices WHERE product_id=NEW.product_id ORDER BY id DESC LIMIT 1),'CLP')='UF' THEN
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Producto UF: cotización pendiente de integración comercial.';
  END IF;
 END//
-CREATE TRIGGER tito_uf_catalog_block_legacy_update BEFORE UPDATE ON products
+CREATE TRIGGER maderas7_ttrazabilidad.tito_uf_catalog_block_legacy_update BEFORE UPDATE ON maderas7_ttrazabilidad.products
 FOR EACH ROW
 BEGIN
- IF NEW.price_clp<>OLD.price_clp AND COALESCE((SELECT price_unit FROM product_commercial_prices WHERE business_id=OLD.business_id AND product_id=OLD.id ORDER BY id DESC LIMIT 1),'CLP')='UF'
- AND NEW.price_clp<>COALESCE((SELECT reference_clp FROM product_commercial_prices WHERE business_id=OLD.business_id AND product_id=OLD.id ORDER BY id DESC LIMIT 1),OLD.price_clp) THEN
+ IF NEW.price_clp<>OLD.price_clp AND COALESCE((SELECT price_unit FROM maderas7_ttrazabilidad.product_commercial_prices WHERE business_id=OLD.business_id AND product_id=OLD.id ORDER BY id DESC LIMIT 1),'CLP')='UF'
+ AND NEW.price_clp<>COALESCE((SELECT reference_clp FROM maderas7_ttrazabilidad.product_commercial_prices WHERE business_id=OLD.business_id AND product_id=OLD.id ORDER BY id DESC LIMIT 1),OLD.price_clp) THEN
   SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Producto UF: cambia la unidad o el precio desde el catálogo comercial.';
  END IF;
 END//

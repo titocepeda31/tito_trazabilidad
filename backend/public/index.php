@@ -36,6 +36,7 @@ require __DIR__ . '/../private/pilot_setup.php';
 require __DIR__ . '/../private/dte.php';
 require __DIR__ . '/../private/dte_tax.php';
 require __DIR__ . '/../private/currency_units.php';
+require __DIR__ . '/../private/uf_official.php';
 require __DIR__ . '/../private/product_price_drafts.php';
 require __DIR__ . '/../private/habitual_credit.php';
 require __DIR__ . '/../private/client_import.php';

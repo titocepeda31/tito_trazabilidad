@@ -51,12 +51,20 @@ function titoCommercialAmount(string $unit,string $final,?string $rate):array{
         $clp=integerPrice((int)$final);
         if($rate===null)return ['clp'=>$clp,'uf'=>null];
         $r=titoCurrencyScaled($rate,2,6);if($r<=0)fail('UF inválida.',422);
-        // CLP <= 1e9: multiply by 1e8 via quotient/remainder to fit signed 64-bit.
+        // CLP <= 1e9: product <= 1e17, fits signed 64-bit.
         $uf=titoCommercialRound($clp*100000000,$r);
         return ['clp'=>$clp,'uf'=>titoDraftDecimal($uf,6)];
     }
     if($rate===null)fail('No hay UF registrada para la fecha de operación.',409);
     return ['clp'=>titoDraftUFReference($final,$rate),'uf'=>$final];
+}
+function titoCommercialSubtotal(int $amount,int $quantityMilli,int $limit):int{
+    $whole=intdiv($quantityMilli,1000);$fraction=$quantityMilli%1000;
+    if($amount<0||$quantityMilli<0||($whole>0&&$amount>intdiv($limit,$whole)))fail('Subtotal demasiado grande.',422);
+    $base=$amount*$whole;
+    $rest=intdiv($amount,1000)*$fraction+titoCommercialRound(($amount%1000)*$fraction,1000);
+    if($base>$limit-$rest)fail('Subtotal demasiado grande.',422);
+    return $base+$rest;
 }
 function registerCommercialPriceRoutes(RouteCollectorProxy $group):void{
     $group->post('/currency/operation-preview',static function(Request $request,Response $response):Response{
@@ -82,8 +90,9 @@ function registerCommercialPriceRoutes(RouteCollectorProxy $group):void{
                 if($originalUnit==='UF'||$unit==='UF'){if(!$r)fail('No existe UF registrada para la fecha elegida.',409);}
                 $converted=titoCommercialAmount($originalUnit,$final,$r);
                 // Preserve original list price and rate; no arbitrary discounts in this preview.
-                $subClp=(int)round((float)$q*$converted['clp'],0,PHP_ROUND_HALF_UP);
-                $subUf=$converted['uf']===null?null:(int)round((float)$q*(float)$converted['uf']*1000000,0,PHP_ROUND_HALF_UP);
+                $qm=titoCurrencyScaled($q,3,10);
+                $subClp=titoCommercialSubtotal($converted['clp'],$qm,1000000000000);
+                $subUf=$converted['uf']===null?null:titoCommercialSubtotal((int)str_replace('.','',$converted['uf']),$qm,PHP_INT_MAX);
                 if($subClp<0||$subClp>1000000000000||$totalClp+$subClp>1000000000000)fail('Total demasiado grande.',422);
                 if($subUf===null)$allUf=false;else{if($subUf<0||$totalUf>PHP_INT_MAX-$subUf)fail('Total UF demasiado grande.',422);$totalUf+=$subUf;}
                 $totalClp+=$subClp;

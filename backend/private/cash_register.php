@@ -84,7 +84,9 @@ function titoCashRegisterExternal(PDO $db,int $businessId,int $actorId,?int $ses
     $sources=[
       'credit_payment'=>['source_credit_payment_id',1,'Abono de fiado #'],
       'customer_refund'=>['source_customer_return_id',-1,'Devolución a cliente #'],
-      'credit_refund'=>['source_credit_refund_id',-1,'Devolución de crédito #']
+      'credit_refund'=>['source_credit_refund_id',-1,'Devolución de crédito #'],
+      'quote_advance'=>['source_quote_advance_id',1,'Anticipo cotización #'],
+      'quote_advance_refund'=>['source_quote_advance_id',-1,'Reembolso anticipo #']
     ];
     if(!isset($sources[$kind]))throw new RuntimeException('Fuente de movimiento desconocida.');
     [$source,$sign,$label]=$sources[$kind];
@@ -115,20 +117,23 @@ function titoCashBalance(PDO $db,int $businessId,int $sessionId): array {
     $st=$db->prepare("SELECT movement_type,COALESCE(SUM(amount_delta_clp),0) AS delta
       FROM cash_movements WHERE business_id=? AND cash_session_id=? GROUP BY movement_type");
     $st->execute([$businessId,$sessionId]);$movements=$st->fetchAll();$st->closeCursor();
-    $cash=0;$creditReceived=0;$customerRefunds=0;$creditRefunds=0;$withdrawals=0;$additions=0;
+    $advanceCash=0;$advanceRefund=0;$cash=0;$creditReceived=0;$customerRefunds=0;$creditRefunds=0;$withdrawals=0;$additions=0;
     foreach($movements as $movement){
        $v=(int)$movement['delta'];
        if($movement['movement_type']==='cash_sale')$cash+=$v;
        elseif($movement['movement_type']==='credit_payment')$creditReceived+=$v;
        elseif($movement['movement_type']==='customer_refund')$customerRefunds-= $v;
        elseif($movement['movement_type']==='credit_refund')$creditRefunds-= $v;
+       elseif($movement['movement_type']==='quote_advance')$advanceCash+=$v;
+       elseif($movement['movement_type']==='quote_advance_refund')$advanceRefund-=$v;
        elseif($movement['movement_type']==='withdrawal')$withdrawals-= $v;
        elseif($movement['movement_type']==='addition')$additions+=$v;
     }
     $st=$db->prepare("SELECT s.payment_method,COUNT(*) AS n,COALESCE(SUM(s.total_clp),0) AS total
       FROM sales s WHERE s.business_id=? AND s.cash_session_id=? GROUP BY s.payment_method");
     $st->execute([$businessId,$sessionId]);$methodTotals=$st->fetchAll();$st->closeCursor();
-    $expected=(int)$session['opening_clp']+$cash+$creditReceived+$additions-$withdrawals-$customerRefunds-$creditRefunds;
+    $expected=(int)$session['opening_clp']+$cash+$creditReceived+$advanceCash+$additions-$withdrawals-$customerRefunds-$creditRefunds-$advanceRefund;
+    $session['quote_advance_cash_clp']=$advanceCash;$session['quote_advance_refund_cash_clp']=$advanceRefund;
     $session['cash_sales_clp']=$cash;
     $session['credit_received_cash_clp']=$creditReceived;
     $session['customer_refunds_cash_clp']=$customerRefunds;
@@ -179,7 +184,7 @@ function registerCashRoutes(RouteCollectorProxy $group): void {
         $u=$request->getAttribute('currentUser');$biz=(int)$u['business_id'];$sid=(int)$args['id'];$db=db();
         $session=titoCashBalance($db,$biz,$sid);
         if(($u['role']??'')!=='admin'&&(int)$session['cashier_id']!==(int)$u['id'])fail('No puedes consultar la caja de otro cajero.',403);
-        $st=$db->prepare("SELECT id,movement_type,amount_delta_clp,source_sale_id,source_credit_payment_id,source_customer_return_id,source_credit_refund_id,actor_id,reason,reference,created_at
+        $st=$db->prepare("SELECT id,movement_type,amount_delta_clp,source_sale_id,source_credit_payment_id,source_customer_return_id,source_credit_refund_id,source_quote_advance_id,actor_id,reason,reference,created_at
           FROM cash_movements WHERE business_id=? AND cash_session_id=? ORDER BY id DESC LIMIT 200");
         $st->execute([$biz,$sid]);$entries=$st->fetchAll();$st->closeCursor();
         return respond($response,['session'=>$session,'movements'=>$entries]);

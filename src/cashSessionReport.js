@@ -8,9 +8,9 @@ export function buildCashReport({session,movements=[]}){
     branch:str(session.warehouse_name),cashier:str(session.cashier_email),
     opened:str(session.opened_at)+' UTC',closed:session.closed_at?str(session.closed_at)+' UTC':'Abierta',
     opening:Number(session.opening_clp),cashSales:Number(session.cash_sales_clp),
-    creditReceived:Number(session.credit_received_cash_clp||0),
+    creditReceived:Number(session.credit_received_cash_clp||0)+Number(session.quote_advance_cash_clp||0),
     customerRefunds:Number(session.customer_refunds_cash_clp||0),
-    creditRefunds:Number(session.credit_refunds_cash_clp||0),
+    creditRefunds:Number(session.credit_refunds_cash_clp||0)+Number(session.quote_advance_refund_cash_clp||0),
     withdrawals:Number(session.withdrawals_clp),expected:Number(session.status==='closed'?session.closing_expected_clp:session.current_expected_clp),
     counted:session.status==='closed'?Number(session.closing_counted_clp):null,
     difference:session.status==='closed'?Number(session.closing_difference_clp):null,
@@ -65,7 +65,7 @@ export async function createCashReportPdf(data,{autoPrint=false}={}){
     const label=m.movement_type==='cash_sale'?'Venta #'+m.source_sale_id:
       m.movement_type==='credit_payment'?'Abono #'+m.source_credit_payment_id:
       m.movement_type==='customer_refund'?'Devolución #'+m.source_customer_return_id:
-      m.movement_type==='credit_refund'?'Reembolso crédito #'+m.source_credit_refund_id:'Retiro / ingreso';
+      m.movement_type==='credit_refund'?'Reembolso crédito #'+m.source_credit_refund_id:m.movement_type==='quote_advance'?'Anticipo #'+m.source_quote_advance_id:m.movement_type==='quote_advance_refund'?'Reembolso anticipo #'+m.source_quote_advance_id:'Retiro / ingreso';
     add(label+': '+amount(m.amount_delta_clp),{size:8});
   }
   add('---------------------------------');

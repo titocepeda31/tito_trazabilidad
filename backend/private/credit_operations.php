@@ -135,7 +135,10 @@ function titoCreditFinancialSummary(PDO $db,int $biz): array {
     // Cobros declarados, no conciliados con bancos. Al anular una venta pagada
     // el cobro histórico sigue hasta que se registre un reembolso confirmado.
     $immediate=$one("SELECT COALESCE(SUM(s.total_clp),0) FROM sales s LEFT JOIN credit_accounts c ON c.sale_id=s.id WHERE s.business_id=? AND c.id IS NULL",[$biz]);
-    $creditPaid=$one('SELECT COALESCE(SUM(amount_clp),0) FROM credit_payments WHERE business_id=?',[$biz]);
+    $creditPaid=$one('SELECT COALESCE(SUM(amount_clp),0) FROM credit_payments WHERE business_id=? AND advance_quote_id IS NULL',[$biz]);
+    $advanceReceived=$one("SELECT COALESCE(SUM(amount_clp),0) FROM quote_advance_movements WHERE business_id=? AND kind='receipt'",[$biz]);
+    $advanceRefund=$one("SELECT COALESCE(SUM(amount_clp),0) FROM quote_advance_movements WHERE business_id=? AND kind='refund'",[$biz]);
+    $advanceApplied=$one('SELECT COALESCE(SUM(amount_clp),0) FROM credit_payments WHERE business_id=? AND advance_quote_id IS NOT NULL',[$biz]);
     $refundsImmediate=$one("SELECT COALESCE(SUM(amount_clp),0) FROM customer_returns WHERE business_id=? AND refund_status='confirmed' AND resolution='refund'",[$biz]);
     $refundsCredit=$one('SELECT COALESCE(SUM(amount_clp),0) FROM credit_refunds WHERE business_id=?',[$biz]);
     $st=$db->prepare(
@@ -155,8 +158,9 @@ function titoCreditFinancialSummary(PDO $db,int $biz): array {
         'net_sales_clp'=>max(0,$gross-$returnsImmediate-$returnsCredit),
         'immediate_declared_clp'=>$immediate,
         'credit_payments_clp'=>$creditPaid,
-        'refunds_confirmed_clp'=>$refundsImmediate+$refundsCredit,
-        'net_collections_declared_clp'=>$immediate+$creditPaid-$refundsImmediate-$refundsCredit,
+        'advances_received_clp'=>$advanceReceived,'advances_refunded_clp'=>$advanceRefund,'advances_available_clp'=>$advanceReceived-$advanceRefund-$advanceApplied,
+        'refunds_confirmed_clp'=>$refundsImmediate+$refundsCredit+$advanceRefund,
+        'net_collections_declared_clp'=>$immediate+$creditPaid+$advanceReceived-$refundsImmediate-$refundsCredit-$advanceRefund,
         'receivables_clp'=>(int)$totals['outstanding'],
         'credit_refund_due_clp'=>(int)$totals['refund_due']
     ];
@@ -197,7 +201,10 @@ function titoCreditFinancialPeriod(PDO $db,int $biz,string $period):array{
     $creditReturns=$sum("SELECT COALESCE(SUM(a.amount_clp),0) FROM credit_adjustments a JOIN credit_accounts c ON c.id=a.account_id AND c.business_id=a.business_id JOIN sales s ON s.id=c.sale_id AND s.business_id=c.business_id WHERE a.business_id=? AND a.kind='return' AND s.status='completed' AND $saleWindow",[$biz,$from,$to]);
     $immediate=$sum("SELECT COALESCE(SUM(s.total_clp),0) FROM sales s LEFT JOIN credit_accounts c ON c.sale_id=s.id WHERE s.business_id=? AND c.id IS NULL AND $saleWindow",[$biz,$from,$to]);
     $payWindow=$filter('p.created_at');
-    $creditPaid=$sum("SELECT COALESCE(SUM(p.amount_clp),0) FROM credit_payments p WHERE p.business_id=? AND $payWindow",[$biz,$from,$to]);
+    $creditPaid=$sum("SELECT COALESCE(SUM(p.amount_clp),0) FROM credit_payments p WHERE p.business_id=? AND p.advance_quote_id IS NULL AND $payWindow",[$biz,$from,$to]);
+    $advanceWindow=$filter('m.created_at');
+    $advanceReceived=$sum("SELECT COALESCE(SUM(m.amount_clp),0) FROM quote_advance_movements m WHERE m.business_id=? AND m.kind='receipt' AND $advanceWindow",[$biz,$from,$to]);
+    $advanceRefund=$sum("SELECT COALESCE(SUM(m.amount_clp),0) FROM quote_advance_movements m WHERE m.business_id=? AND m.kind='refund' AND $advanceWindow",[$biz,$from,$to]);
     $creditRefundWindow=$filter('r.created_at');
     $creditRefund=$sum("SELECT COALESCE(SUM(r.amount_clp),0) FROM credit_refunds r WHERE r.business_id=? AND $creditRefundWindow",[$biz,$from,$to]);
     // DATETIME UTC, no TIMESTAMP: se compara con límites UTC textuales.
@@ -218,8 +225,9 @@ function titoCreditFinancialPeriod(PDO $db,int $biz,string $period):array{
         'net_sales_clp'=>max(0,$gross-$immediateReturns-$creditReturns),
         'immediate_declared_clp'=>$immediate,
         'credit_payments_clp'=>$creditPaid,
-        'refunds_confirmed_clp'=>$immediateRefund+$creditRefund,
-        'net_collections_declared_clp'=>$immediate+$creditPaid-$immediateRefund-$creditRefund,
+        'advances_received_clp'=>$advanceReceived,'advances_refunded_clp'=>$advanceRefund,'advances_available_clp'=>$all['advances_available_clp'],
+        'refunds_confirmed_clp'=>$immediateRefund+$creditRefund+$advanceRefund,
+        'net_collections_declared_clp'=>$immediate+$creditPaid+$advanceReceived-$immediateRefund-$creditRefund-$advanceRefund,
         'receivables_clp'=>$all['receivables_clp'],
         'credit_refund_due_clp'=>$all['credit_refund_due_clp']
     ];

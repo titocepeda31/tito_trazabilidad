@@ -64,7 +64,49 @@ function quoteDraftLines(PDO $db,int $biz,array $items,array $old): array {
     return [array_values($rows),$total];
 }
 
+function quoteAdvanceSummary(PDO $db,int $biz,int $qid): array {
+    $s=$db->prepare("SELECT COALESCE(SUM(CASE WHEN kind='receipt' THEN amount_clp ELSE 0 END),0) received,COALESCE(SUM(CASE WHEN kind='refund' THEN amount_clp ELSE 0 END),0) refunded FROM quote_advance_movements WHERE business_id=? AND quote_id=?");
+    $s->execute([$biz,$qid]);$r=$s->fetch();$s->closeCursor();
+    $s=$db->prepare('SELECT COALESCE(SUM(amount_clp),0) FROM credit_payments WHERE business_id=? AND advance_quote_id=?');$s->execute([$biz,$qid]);$applied=(int)$s->fetchColumn();$s->closeCursor();
+    $received=(int)$r['received'];$refunded=(int)$r['refunded'];$available=$received-$refunded-$applied;
+    if($available<0)throw new RuntimeException('Libro de anticipos inconsistente.');
+    return ['received_clp'=>$received,'refunded_clp'=>$refunded,'applied_clp'=>$applied,'available_clp'=>$available];
+}
+function quoteAdvanceRemainingValue(PDO $db,int $biz,array $q): int {
+    if($q['status']==='accepted'&&$q['valid_until']>=quoteToday())return (int)$q['total_clp'];
+    if($q['status']!=='reserved')return 0;
+    $s=$db->prepare("SELECT id,expires_on FROM serial_reservations WHERE business_id=? AND quote_id=? AND status='pending' ORDER BY id DESC LIMIT 1 FOR UPDATE");$s->execute([$biz,$q['id']]);$r=$s->fetch();$s->closeCursor();
+    if(!$r||reservationExpired($r['expires_on']))return 0;
+    $s=$db->prepare('SELECT COALESCE(SUM(total_clp),0) FROM quote_dispatches WHERE business_id=? AND quote_id=?');$s->execute([$biz,$q['id']]);$delivered=(int)$s->fetchColumn();$s->closeCursor();
+    return max(0,(int)$q['total_clp']-$delivered);
+}
 function registerQuoteRoutes(RouteCollectorProxy $group): void {
+    $group->post('/quotes/{id:[0-9]+}/advances',static function(Request $request,Response $response,array $args): Response {
+        $a=adminOnly($request);$biz=(int)$a['business_id'];$uid=(int)$a['id'];$qid=(int)$args['id'];$b=requestBody($request);
+        if(array_diff(array_keys($b),['request_id','kind','amount_clp','method','reference','reason']))fail('Campos inesperados.',422);
+        $rid=titoCreditUuid($b['request_id']??null);$kind=$b['kind']??null;$method=$b['method']??null;
+        if(!in_array($kind,['receipt','refund'],true)||!in_array($method,['efectivo','transferencia','tarjeta','otro'],true))fail('Tipo o medio inválido.',422);
+        $amount=titoCreditUnsigned($b['amount_clp']??null,'anticipo',1,100000000000);
+        $ref=titoCreditString($b,'reference',120);$reason=titoCreditString($b,'reason',250,true);if(mb_strlen($reason)<3)fail('Indica un motivo.',422);
+        $hash=hash('sha256',json_encode([$qid,$uid,$kind,$amount,$method,$ref,$reason],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
+        $db=db();$db->beginTransaction();
+        try{
+            originLockCompany($db,$biz);$q=quoteLock($db,$biz,$qid);
+            $s=$db->prepare('SELECT id,payload_hash FROM quote_advance_movements WHERE business_id=? AND request_id=?');$s->execute([$biz,$rid]);$old=$s->fetch();$s->closeCursor();
+            if($old){if(!hash_equals($old['payload_hash'],$hash))fail('Solicitud reutilizada con otros datos.',409);$db->commit();return respond($response,['ok'=>true,'movement_id'=>(int)$old['id'],'already_recorded'=>true]);}
+            if($q['client_id']===null)fail('Se requiere cliente vinculado.',409);
+            $sum=quoteAdvanceSummary($db,$biz,$qid);
+            if($kind==='receipt'){
+                $s=$db->prepare('SELECT id FROM habitual_clients WHERE business_id=? AND id=? AND is_active=1 FOR UPDATE');$s->execute([$biz,$q['client_id']]);$active=$s->fetchColumn();$s->closeCursor();
+                if(!$active||$amount+$sum['available_clp']>quoteAdvanceRemainingValue($db,$biz,$q))fail('Anticipo superior al valor pendiente de entregar o cotización no vigente.',409);
+            }elseif($amount>$sum['available_clp'])fail('El reembolso supera el anticipo no aplicado.',409);
+            $session=titoCashSessionForReceipt($db,$a,$request);
+            $s=$db->prepare('INSERT INTO quote_advance_movements(business_id,quote_id,client_id,actor_id,kind,amount_clp,method,reference,reason,cash_session_id,request_id,payload_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)');
+            $s->execute([$biz,$qid,$q['client_id'],$uid,$kind,$amount,$method,$ref,$reason,$session,$rid,$hash]);$id=(int)$db->lastInsertId();
+            if($method==='efectivo')titoCashRegisterExternal($db,$biz,$uid,$session,$kind==='receipt'?'quote_advance':'quote_advance_refund',$id,$amount);
+            $db->commit();return respond($response,['ok'=>true,'movement_id'=>$id],201);
+        }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
+    });
     // Agenda comercial: solo administradores de la empresa en esta fase.
     $group->get('/quotes/followups',static function(Request $request,Response $response): Response {
         $a=adminOnly($request);$biz=(int)$a['business_id'];$db=db();$p=$request->getQueryParams();
@@ -165,7 +207,12 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
         }
         $s=db()->prepare('SELECT d.id,d.reservation_id,d.sale_id,d.total_clp,d.created_at,s.status AS sale_status,ca.id AS credit_account_id FROM quote_dispatches d JOIN sales s ON s.id=d.sale_id AND s.business_id=d.business_id LEFT JOIN credit_accounts ca ON ca.sale_id=s.id AND ca.business_id=s.business_id WHERE d.business_id=? AND d.quote_id=? ORDER BY d.id');
         $s->execute([$biz,$id]);$dispatches=$s->fetchAll();$s->closeCursor();
-        return respond($response,['quote'=>quoteEffective($quote),'items'=>$items,'events'=>$events,'reservation'=>$reservation?:null,'dispatches'=>$dispatches]);
+        $advances=null;
+        if($admin['role']==='admin'){
+            $advances=quoteAdvanceSummary(db(),$biz,$id);
+            $s=db()->prepare('SELECT id,kind,amount_clp,method,reference,reason,created_at FROM quote_advance_movements WHERE business_id=? AND quote_id=? ORDER BY id DESC LIMIT 100');$s->execute([$biz,$id]);$advances['movements']=$s->fetchAll();$s->closeCursor();
+        }
+        return respond($response,['quote'=>quoteEffective($quote),'items'=>$items,'events'=>$events,'reservation'=>$reservation?:null,'dispatches'=>$dispatches,'advances'=>$advances]);
     });
     $group->post('/quotes',static function(Request $request,Response $response): Response {
         $admin=quoteCreationActor($request);
@@ -410,10 +457,12 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
     $group->post('/quotes/{id:[0-9]+}/convert',static function(Request $request,Response $response,array $args): Response {
         $admin=adminOnly($request);$biz=(int)$admin['business_id'];$uid=(int)$admin['id'];$qid=(int)$args['id'];
         $b=requestBody($request);
-        if(array_diff(array_keys($b),['payment_method','warehouse_id','serial_items','reservation_id','request_id','revision','dispatch_items','due_date','initial_payment_clp','initial_payment_method','initial_payment_reference']))fail('Campos inesperados.',422);
+        if(array_diff(array_keys($b),['payment_method','warehouse_id','serial_items','reservation_id','request_id','revision','dispatch_items','due_date','initial_payment_clp','initial_payment_method','initial_payment_reference','advance_apply_clp']))fail('Campos inesperados.',422);
         $payment=$b['payment_method']??null;
         if(!in_array($payment,['efectivo','transferencia','tarjeta','otro','credito'],true))fail('Medio de pago inválido.',422);
+        $advance=titoCreditUnsigned($b['advance_apply_clp']??0,'anticipo a aplicar');
         $credit=$payment==='credito';$due=null;$initial=0;$initialMethod=null;$initialRef=null;
+        if($advance>0&&!$credit)fail('Para aplicar anticipo selecciona liquidación con cuenta por cobrar.',422);
         if($credit){
             $due=reservationDate($b['due_date']??null);
             $initial=titoCreditUnsigned($b['initial_payment_clp']??0,'abono al entregar');
@@ -455,6 +504,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
         ksort($series,SORT_NUMERIC);
         $canonical=[$warehouse,$payment,$series];if($resId!==null)$canonical[]=$resId;
         if($credit)$canonical[]=['due_date'=>$due,'initial_payment_clp'=>$initial,'initial_payment_method'=>$initialMethod,'initial_payment_reference'=>$initialRef];
+        if($advance>0)$canonical[]=['advance_apply_clp'=>$advance];
         $conversionHash=hash('sha256',json_encode($canonical,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
         $db=db();
         try{
@@ -540,7 +590,11 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
                 serialRequireFree($db,$biz,$pid,$saleLocation,$qty,$resId);
             }
             if(array_diff_key($series,$controlledIds))fail('Se enviaron series para productos no serializados o ajenos a la cotización.',422);
-            if($credit){$expected=array_sum(array_map(static fn($i)=>(int)$i['subtotal_clp'],$items));if($expected<=0||$initial>=$expected)fail('La venta a plazo requiere un saldo positivo. Para pago total usa contado.',422);}
+            $expected=array_sum(array_map(static fn($i)=>(int)$i['subtotal_clp'],$items));
+            $advanceAvailable=quoteAdvanceSummary($db,$biz,$qid)['available_clp'];
+            if($advance>$advanceAvailable)fail('Anticipo disponible insuficiente.',409);
+            if($advanceAvailable>0&&$advance!==min($advanceAvailable,$expected))fail('Aplica primero el anticipo disponible a esta entrega para evitar doble cobro.',409);
+            if($credit&&($expected<=0||$initial+$advance>$expected||($advance===0&&$initial===$expected)))fail('Importe de liquidación inválido.',422);
             // Cada entrega registra una venta independiente; cotización y reserva están bloqueadas.
             $rid=sprintf('%08x-%04x-4%03x-%04x-%012x',random_int(0,0xffffffff),random_int(0,0xffff),random_int(0,0xfff),random_int(0x8000,0xbfff),random_int(0,0xffffffffffff));
             $st=$db->prepare('INSERT INTO sales(business_id,sold_by,request_id,payment_method,total_clp,warehouse_id,cash_session_id,client_id,client_name_snapshot,client_rut_snapshot,customer_mode) VALUES(?,?,?,?,0,?,?,?,?,?,?)');
@@ -578,6 +632,12 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
                 $st=$db->prepare('INSERT INTO credit_accounts(business_id,client_id,sale_id,created_by,request_id,payload_hash,original_total_clp,due_date,notes) VALUES(?,?,?,?,?,?,?,?,?)');
                 $st->execute([$biz,$quote['client_id'],$sid,$uid,$rid,$dispatchHash??$conversionHash,$total,$due,'Venta comercial desde cotización #'.$qid]);
                 $accountId=(int)$db->lastInsertId();
+                if($advance>0){
+                    $applyRid=titoCashSourceRequestId('quote_advance_apply',$sid);
+                    $applyHash=hash('sha256',json_encode([$qid,$accountId,$advance],JSON_THROW_ON_ERROR));
+                    $st=$db->prepare("INSERT INTO credit_payments(business_id,account_id,created_by,request_id,payload_hash,amount_clp,method,reference,cash_session_id,advance_quote_id) VALUES(?,?,?,?,?,?,'otro',?,NULL,?)");
+                    $st->execute([$biz,$accountId,$uid,$applyRid,$applyHash,$advance,'Aplicación anticipo cotización #'.$qid,$qid]);
+                }
                 if($initial>0){
                     $paymentHash=hash('sha256',json_encode([$accountId,$initial,$initialMethod,$initialRef],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
                     $st=$db->prepare('INSERT INTO credit_payments(business_id,account_id,created_by,request_id,payload_hash,amount_clp,method,reference,cash_session_id) VALUES(?,?,?,?,?,?,?,?,?)');
@@ -592,9 +652,9 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
                 $s->execute([$biz,$qid,$resId,$sid,$uid,$dispatchRequest,$dispatchHash,$total]);
                 if($isFinal)reservationComplete($db,$biz,$resId,$sid,$uid);
             }
-            quoteEvent($db,$biz,$qid,$uid,$isFinal?'converted':'partial_dispatch',$from,$to,null,['sale_id'=>$sid,'reservation_id'=>$resId,'total_clp'=>$total,'warehouse_id'=>$saleLocation,'payment_method'=>$payment,'credit_account_id'=>$accountId,'due_date'=>$due,'initial_payment_clp'=>$initial,'serial_items'=>$series,'items'=>array_map(static fn($i)=>['product_id'=>$i['product_id'],'quantity'=>$i['quantity'],'subtotal_clp'=>$i['subtotal_clp']],$items)],$dispatchRequest,$dispatchHash??$conversionHash);
+            quoteEvent($db,$biz,$qid,$uid,$isFinal?'converted':'partial_dispatch',$from,$to,null,['sale_id'=>$sid,'reservation_id'=>$resId,'total_clp'=>$total,'warehouse_id'=>$saleLocation,'payment_method'=>$payment,'credit_account_id'=>$accountId,'due_date'=>$due,'initial_payment_clp'=>$initial,'advance_applied_clp'=>$advance,'serial_items'=>$series,'items'=>array_map(static fn($i)=>['product_id'=>$i['product_id'],'quantity'=>$i['quantity'],'subtotal_clp'=>$i['subtotal_clp']],$items)],$dispatchRequest,$dispatchHash??$conversionHash);
             $db->commit();
-            return respond($response,['ok'=>true,'quote_id'=>$qid,'sale_id'=>$sid,'total_clp'=>$total,'warehouse_id'=>$saleLocation,'complete'=>$isFinal,'credit_account_id'=>$accountId,'balance_clp'=>$credit?$total-$initial:0],201);
+            return respond($response,['ok'=>true,'quote_id'=>$qid,'sale_id'=>$sid,'total_clp'=>$total,'warehouse_id'=>$saleLocation,'complete'=>$isFinal,'credit_account_id'=>$accountId,'balance_clp'=>$credit?$total-$initial-$advance:0],201);
         }catch(Throwable $e){
             if($db->inTransaction())$db->rollBack();
             throw $e;

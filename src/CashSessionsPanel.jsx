@@ -179,7 +179,7 @@ export default function CashSessionsPanel({request,notify,isAdmin,userId}){
       <div className="cash-figures">
         <div><span>Fondo inicial</span><strong>{clp(session.opening_clp)}</strong></div>
         <div><span>Ventas en efectivo</span><strong>{clp(session.cash_sales_clp)}</strong></div>
-        <div><span>Abonos de fiados en efectivo</span><strong>+{clp(session.credit_received_cash_clp)}</strong></div>
+        <div><span>Abonos de fiados en efectivo</span><strong>+{clp(session.credit_received_cash_clp)}</strong></div><div><span>Anticipos en efectivo</span><strong>+{clp(session.quote_advance_cash_clp||0)}</strong></div><div><span>Reembolsos de anticipos</span><strong>−{clp(session.quote_advance_refund_cash_clp||0)}</strong></div>
         <div><span>Devoluciones de productos en efectivo</span><strong>−{clp(session.customer_refunds_cash_clp)}</strong></div>
         <div><span>Reembolsos de crédito en efectivo</span><strong>−{clp(session.credit_refunds_cash_clp)}</strong></div>
         <div><span>Retirado por recaudación</span><strong>−{clp(session.withdrawals_clp)}</strong></div>
@@ -245,7 +245,7 @@ export default function CashSessionsPanel({request,notify,isAdmin,userId}){
       <div className="cash-figures">
         <div><span>Fondo inicial</span><strong>{clp(selected.opening_clp)}</strong></div>
         <div><span>Ventas en efectivo</span><strong>{clp(selected.cash_sales_clp)}</strong></div>
-        <div><span>Abonos de fiados en efectivo</span><strong>+{clp(selected.credit_received_cash_clp)}</strong></div>
+        <div><span>Abonos de fiados en efectivo</span><strong>+{clp(selected.credit_received_cash_clp)}</strong></div><div><span>Anticipos en efectivo</span><strong>+{clp(selected.quote_advance_cash_clp||0)}</strong></div><div><span>Reembolsos de anticipos</span><strong>−{clp(selected.quote_advance_refund_cash_clp||0)}</strong></div>
         <div><span>Devoluciones de productos en efectivo</span><strong>−{clp(selected.customer_refunds_cash_clp)}</strong></div>
         <div><span>Reembolsos de crédito en efectivo</span><strong>−{clp(selected.credit_refunds_cash_clp)}</strong></div>
         <div><span>Recaudaciones</span><strong>−{clp(selected.withdrawals_clp)}</strong></div>
@@ -272,6 +272,8 @@ export default function CashSessionsPanel({request,notify,isAdmin,userId}){
             m.movement_type==='credit_payment'?'Abono de fiado #'+m.source_credit_payment_id:
             m.movement_type==='customer_refund'?'Reembolso por devolución #'+m.source_customer_return_id:
             m.movement_type==='credit_refund'?'Reembolso de crédito #'+m.source_credit_refund_id:
+            m.movement_type==='quote_advance'?'Anticipo #'+m.source_quote_advance_id:
+            m.movement_type==='quote_advance_refund'?'Reembolso anticipo #'+m.source_quote_advance_id:
             m.movement_type==='withdrawal'?'Retiro · '+(m.reference||''):'Ingreso'}
             <small>{m.reason} · {m.created_at} UTC</small></span>
           <strong>{Number(m.amount_delta_clp)>0?'+':''}{clp(m.amount_delta_clp)}</strong>

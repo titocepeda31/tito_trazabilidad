@@ -1,0 +1,22 @@
+import React,{useState,useRef} from 'react';
+import {newId,pesos} from './api.js';
+const methods={efectivo:'Efectivo',transferencia:'Transferencia',tarjeta:'Tarjeta',otro:'Otro'};
+export default function QuoteAdvancesPanel({data,request,notify,onBack}){
+ const a=data.advances||{},q=data.quote;
+ const [kind,setKind]=useState('receipt'),[amount,setAmount]=useState(''),[method,setMethod]=useState('transferencia'),[reference,setReference]=useState(''),[reason,setReason]=useState(''),[busy,setBusy]=useState(false),[uncertain,setUncertain]=useState(false),[error,setError]=useState('');
+ const pending=useRef(null),saving=useRef(false);
+ const canReceive=['accepted','reserved'].includes(q.effective_status||q.status);
+ async function submit(e){e?.preventDefault();if(saving.current)return;let body=pending.current;
+ if(!body){const n=Number(amount);if(!Number.isSafeInteger(n)||n<=0||reason.trim().length<3||(kind==='receipt'&&!canReceive)||(kind==='refund'&&n>Number(a.available_clp)))return;
+ if(!window.confirm((kind==='receipt'?'¿Confirmas haber recibido ':'¿Confirmas haber devuelto ')+pesos(n)+'? Esto no mueve dinero automáticamente.'))return;
+ body={request_id:newId(),kind,amount_clp:n,method,reference:reference.trim()||null,reason:reason.trim()};pending.current=body;}
+ saving.current=true;setBusy(true);setError('');
+ try{const r=await request('/quotes/'+q.id+'/advances',{method:'POST',body});if(!r.ok||!r.movement_id)throw new Error('Resultado no confirmado');pending.current=null;setUncertain(false);notify('Movimiento de anticipo registrado.','success');await onBack();}
+ catch(e){const unknown=!(e.status>=400&&e.status<500&&![408,429].includes(e.status));if(!unknown)pending.current=null;setUncertain(unknown);setError(unknown?'Resultado incierto. Reintenta el mismo movimiento.':e.message);}finally{saving.current=false;setBusy(false);}}
+ const locked=busy||uncertain;
+ return <div className="quotes-page"><div className="section-intro"><div><button type="button" className="text-button" disabled={locked} onClick={onBack}>← Volver a cotización</button><h2>Anticipos · Cotización #{q.id}</h2><p>{q.customer_name}</p></div></div>
+ <section className="panel pad formstack"><div className="table-wrap"><table><tbody>{[['Recibido',a.received_clp],['Aplicado a ventas',a.applied_clp],['Devuelto',a.refunded_clp],['Disponible sin aplicar',a.available_clp]].map(([l,v])=><tr key={l}><th>{l}</th><td>{pesos(v||0)}</td></tr>)}</tbody></table></div><p className="helper">El anticipo no crea venta ni descuenta stock. Al entregar se aplica hasta el total de la entrega. El sobrante no aplicado puede devolverse incluso si la reserva venció o fue cancelada.</p></section>
+ {error&&<p className="warning-box">{error}</p>}{uncertain&&<button className="primary" type="button" disabled={busy} onClick={()=>submit()}>Reintentar mismo movimiento</button>}
+ <form className="panel pad formstack" onSubmit={submit}><h3>Registrar dinero efectivamente recibido o devuelto</h3><label>Movimiento<select disabled={locked} value={kind} onChange={e=>setKind(e.target.value)}><option value="receipt" disabled={!canReceive}>Recibir anticipo</option><option value="refund" disabled={!Number(a.available_clp)}>Devolver saldo no aplicado</option></select></label><label>Monto CLP<input type="number" min="1" step="1" required value={amount} disabled={locked} onChange={e=>setAmount(e.target.value)}/></label><label>Medio<select disabled={locked} value={method} onChange={e=>setMethod(e.target.value)}>{Object.entries(methods).map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></label><label>Referencia<input maxLength={120} value={reference} disabled={locked} onChange={e=>setReference(e.target.value)}/></label><label>Motivo<input required minLength={3} maxLength={250} disabled={locked} value={reason} onChange={e=>setReason(e.target.value)}/></label><button className="primary" disabled={locked||!amount||reason.trim().length<3||(kind==='receipt'&&!canReceive)||(kind==='refund'&&!Number(a.available_clp))}>Confirmar movimiento</button></form>
+ <section className="panel pad"><h3>Últimos 100 ingresos y devoluciones</h3>{(a.movements||[]).map(m=><p key={m.id}><strong>{m.kind==='receipt'?'Recibido':'Devuelto'} #{m.id} · {pesos(m.amount_clp)}</strong> · {methods[m.method]||m.method} · {String(m.created_at).slice(0,16)} · {m.reason} {m.reference||''}</p>)}{!a.movements?.length&&<p>Sin movimientos.</p>}</section></div>;
+}

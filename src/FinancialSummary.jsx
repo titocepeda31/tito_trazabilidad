@@ -98,7 +98,7 @@ export default function FinancialSummary({request,notify,variant='full'}){
           <div className="finance-breakdown-row"><span>Ventas del período anuladas (excluidas)</span><strong>{pesos(summary.voided_sales_clp)}</strong></div>
           <h4>Dinero registrado en el período</h4>
           <div className="finance-breakdown-row"><span>Cobros inmediatos declarados</span><strong>{pesos(summary.immediate_declared_clp)}</strong></div>
-          <div className="finance-breakdown-row"><span>Abonos de clientes a crédito</span><strong>{pesos(summary.credit_payments_clp)}</strong></div>
+          <div className="finance-breakdown-row"><span>Abonos de clientes a crédito</span><strong>{pesos(summary.credit_payments_clp)}</strong></div><div className="finance-breakdown-row"><span>Anticipos recibidos</span><strong>{pesos(summary.advances_received_clp||0)}</strong></div><div className="finance-breakdown-row"><span>Anticipos aún no aplicados (saldo actual)</span><strong>{pesos(summary.advances_available_clp||0)}</strong></div>
           <div className="finance-breakdown-row"><span>Reembolsos confirmados</span><strong>−{pesos(summary.refunds_confirmed_clp)}</strong></div>
           <div className="finance-breakdown-row finance-breakdown-total"><span>Cobros netos registrados</span><strong>{pesos(summary.net_collections_declared_clp)}</strong></div>
           <div className="finance-breakdown-row"><span>Saldo a favor de clientes a crédito · ahora</span><strong>{pesos(refundDue)}</strong></div>

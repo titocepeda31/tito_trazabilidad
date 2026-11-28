@@ -217,7 +217,7 @@ function registerHabitualCreditRoutes(RouteCollectorProxy $group): void {
         $st=$db->prepare(titoCreditAccountListSql().' WHERE a.business_id=? AND a.id=? LIMIT 1');
         $st->execute([$biz,$id]);$account=$st->fetch();
         if(!$account)fail('Cuenta por cobrar no encontrada.',404);
-        $st=$db->prepare('SELECT p.id,p.amount_clp,p.method,p.reference,p.created_at,u.email AS received_by_email FROM credit_payments p JOIN users u ON u.id=p.created_by WHERE p.business_id=? AND p.account_id=? ORDER BY p.id DESC');
+        $st=$db->prepare('SELECT p.id,p.amount_clp,p.method,p.reference,p.advance_quote_id,p.created_at,u.email AS received_by_email FROM credit_payments p JOIN users u ON u.id=p.created_by WHERE p.business_id=? AND p.account_id=? ORDER BY p.id DESC');
         $st->execute([$biz,$id]);
         return respond($response,['account'=>$account,'payments'=>$st->fetchAll()]);
     });

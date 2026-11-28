@@ -112,23 +112,23 @@ function titoSaleHistoricalLocation(PDO $db,int $biz,int $saleId): int {
  * - entrada a otra sucursal: trigger suma al local, luego mueve esas unidades a destino.
  * Debe invocarse DENTRO de la transacción del movimiento; no crea un traslado comercial.
  */
-function titoApplyLocationStock(PDO $db,int $biz,int $pid,int $warehouseId,float $delta): string {
-    return titoApplyLocationStockCore($db,$biz,$pid,$warehouseId,$delta,'legacy');
+function titoApplyLocationStock(PDO $db,int $biz,int $pid,int $warehouseId,float $delta,?int $reservationId=null): string {
+    return titoApplyLocationStockCore($db,$biz,$pid,$warehouseId,$delta,'legacy',$reservationId);
 }
 /** Solo para recepción: quien llama debe insertar las unidades y conciliar en la misma transacción. */
 function titoReceiveLocationStock(PDO $db,int $biz,int $pid,int $warehouseId,float $quantity,bool $serialReceipt): string {
     if($quantity<=0)fail('Cantidad recibida inválida.',422);
     return titoApplyLocationStockCore($db,$biz,$pid,$warehouseId,$quantity,$serialReceipt?'receipt':'legacy');
 }
-function titoSellSerialLocationStock(PDO $db,int $biz,int $pid,int $warehouseId,float $quantity): string {
+function titoSellSerialLocationStock(PDO $db,int $biz,int $pid,int $warehouseId,float $quantity,?int $reservationId=null): string {
     if($quantity<=0)fail('Cantidad vendida inválida.',422);
-    return titoApplyLocationStockCore($db,$biz,$pid,$warehouseId,-$quantity,'sale');
+    return titoApplyLocationStockCore($db,$biz,$pid,$warehouseId,-$quantity,'sale',$reservationId);
 }
 function titoRestoreSerialLocationStock(PDO $db,int $biz,int $pid,int $warehouseId,float $quantity): string {
     if($quantity<=0)fail('Cantidad devuelta inválida.',422);
     return titoApplyLocationStockCore($db,$biz,$pid,$warehouseId,$quantity,'return');
 }
-function titoApplyLocationStockCore(PDO $db,int $biz,int $pid,int $warehouseId,float $delta,string $mode): string {
+function titoApplyLocationStockCore(PDO $db,int $biz,int $pid,int $warehouseId,float $delta,string $mode,?int $reservationId=null): string {
     if(!$db->inTransaction())throw new RuntimeException('Se requiere transacción de inventario.');
     if(!is_finite($delta)||abs($delta)<0.0005||abs($delta)>1000000000
         ||abs($delta*1000-round($delta*1000))>0.00001)fail('Variación de stock inválida.',422);
@@ -148,6 +148,9 @@ function titoApplyLocationStockCore(PDO $db,int $biz,int $pid,int $warehouseId,f
     }
     if($localId===null||!array_key_exists($warehouseId,$balances))fail('Inventario de sucursal no configurado.',409);
     if(abs($sum-(float)$global)>0.0005)fail('Inventario sin conciliar. Operación detenida.',409);
+    // Toda salida, incluso crédito/importación/ajuste normal, protege el stock comprometido.
+    // Solo el despacho validado de una reserva puede excluir esa misma reserva.
+    if($delta<0)serialRequireFree($db,$biz,$pid,$warehouseId,-$delta,$reservationId);
     $result=(float)$global+$delta;
     $resultLocation=$balances[$warehouseId]+$delta;
     if($result< -0.000001||$result>1000000000||$resultLocation< -0.000001||$resultLocation>1000000000)
@@ -432,7 +435,7 @@ function registerWarehouseRoutes(RouteCollectorProxy $group): void {
         }
         if($indexes){
             $r=db()->prepare("SELECT i.product_id,r.warehouse_id,SUM(i.quantity) AS qty FROM serial_reservation_items i JOIN serial_reservations r ON r.id=i.reservation_id AND r.business_id=i.business_id WHERE i.business_id=? AND r.status='pending' GROUP BY i.product_id,r.warehouse_id");$r->execute([$biz]);
-            foreach($r->fetchAll() as $row)if(isset($indexes[(int)$row['product_id']]))$stocks[$indexes[(int)$row['product_id']]]['reserved_locations'][(string)$row['warehouse_id']]=(int)$row['qty'];
+            foreach($r->fetchAll() as $row)if(isset($indexes[(int)$row['product_id']]))$stocks[$indexes[(int)$row['product_id']]]['reserved_locations'][(string)$row['warehouse_id']]=(float)$row['qty'];
         }
         return respond($response,['stocks'=>$stocks]);
     });
@@ -509,7 +512,7 @@ function registerWarehouseRoutes(RouteCollectorProxy $group): void {
                 foreach($rows as $row)$stocks[(int)$row['warehouse_id']]=(float)$row['qty'];
                 if(count($stocks)!==2)fail('Stock por ubicación incompleto para '.$p['name'],409);
                 if($stocks[$source]+0.00001<(float)$qty)fail('Stock insuficiente en bodega de origen para '.$p['name'],409);
-                if($controlled)serialRequireFree($db,$biz,$pid,$source,(float)$qty);
+                serialRequireFree($db,$biz,$pid,$source,(float)$qty);
                 $from=number_format(max(0,$stocks[$source]-(float)$qty),3,'.','');
                 $to=number_format($stocks[$target]+(float)$qty,3,'.','');
                 if((float)$to>1000000000)fail('Stock destino fuera de rango.',422);

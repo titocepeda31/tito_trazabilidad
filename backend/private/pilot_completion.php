@@ -68,6 +68,7 @@ function registerPilotCompletionRoutes(RouteCollectorProxy $group): void {
         $db=db();
         try{
             $db->beginTransaction();
+            originLockCompany($db,$biz);
             // Bloqueo por solicitud, evitando reintentos duplicados o simultáneos.
             $st=$db->prepare('INSERT INTO warehouse_adjustments(business_id,created_by,request_id,payload_hash,product_id,warehouse_code,delta_qty,qty_before,qty_after,total_before,total_after,reason) VALUES(?,?,?,?,?,?,?,0,0,0,0,?)');
             $st->execute([$biz,$uid,$rid,$hash,$pid,$code,$deltaFormatted,$reason]);
@@ -84,6 +85,7 @@ function registerPilotCompletionRoutes(RouteCollectorProxy $group): void {
             $local=(float)$byCode['local']['qty'];
             $locBefore=(float)$byCode[$code]['qty'];
             $globalBefore=(float)$p['stock_qty'];
+            if($delta<0)serialRequireFree($db,$biz,$pid,(int)$byCode[$code]['warehouse_id'],-$delta);
             $locAfter=$locBefore+$delta;$globalAfter=$globalBefore+$delta;
             if($locAfter< -0.000001)fail('No hay suficiente stock en '.($code==='local'?'Local de venta':'Bodega de respaldo').'.',409);
             if($globalAfter< -0.000001||$globalAfter>1000000000||$locAfter>1000000000)fail('Stock final fuera de rango.',422);

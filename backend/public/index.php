@@ -303,7 +303,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
                     if(!$hasSerial||$product['sale_unit']!=='unidad'||(float)$qty!==(float)count($numbers))throw new HttpError('Selecciona una serie disponible por unidad de '.$product['name'].'.',422,'serial_numbers');
                     serialReconcile($db,$biz,$id,(float)$product['stock_qty']);
                     serialRequireFree($db,$biz,$id,$saleLocation,(float)$qty,$reservationId);
-                    $next=titoSellSerialLocationStock($db,$biz,$id,$saleLocation,(float)$qty);
+                    $next=titoSellSerialLocationStock($db,$biz,$id,$saleLocation,(float)$qty,$reservationId);
                 }else{
                     if(array_key_exists('serial_numbers',$spec))fail('El producto no tiene control de series.',422);
                     $next=titoApplyLocationStock($db,$biz,$id,$saleLocation,-(float)$qty);
@@ -336,7 +336,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
         if($pid<1)fail('Producto inválido.',422);
         $db=db();
         try{
-            $db->beginTransaction();
+            $db->beginTransaction();originLockCompany($db,$biz);
             $st=$db->prepare('SELECT id,name,stock_qty,sale_unit FROM products WHERE id=? AND business_id=? AND is_active=1 FOR UPDATE');
             $st->execute([$pid,$biz]);$product=$st->fetch();$st->closeCursor();
             if(!$product)fail('Producto no encontrado.',404);
@@ -345,7 +345,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
             $next=(float)$product['stock_qty']+(float)$delta;
             if($next< -0.00001 || $next>1000000000)fail('Stock resultante inválido.',422);
             serialRejectLegacy($db,$biz,$pid);
-            if((float)$delta<0)titoCheckStoreStock($db,$biz,$pid,abs((float)$delta),$product['name']);
+            if((float)$delta<0)serialRequireFree($db,$biz,$pid,titoLocalLocationId($db,$biz),abs((float)$delta));
             $balance=number_format(max(0,$next),3,'.','');
             $st=$db->prepare('UPDATE products SET stock_qty=? WHERE id=? AND business_id=?');
             $st->execute([$balance,$pid,$biz]);

@@ -249,7 +249,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             $db->commit();return respond($response,['ok'=>true,'quote_id'=>$qid,'revision'=>$revision+1]);
         }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
     });
-    // Reserva completa de cotización serializada. Sin caja, sin salida física y sin selección de series.
+    // Reserva completa de cotización normal, serializada o mixta. Sin caja, salida física ni selección de series.
     $group->post('/quotes/{id:[0-9]+}/reserve',static function(Request $request,Response $response,array $args): Response {
         $a=adminOnly($request);$biz=(int)$a['business_id'];$uid=(int)$a['id'];$qid=(int)$args['id'];$b=requestBody($request);
         if(array_diff(array_keys($b),['request_id','revision','warehouse_id','note']))fail('Campos no permitidos.',422);
@@ -272,13 +272,19 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             $lock=$db->prepare('SELECT stock_qty,sale_unit FROM products WHERE business_id=? AND id=? AND is_active=1 FOR UPDATE');
             foreach($items as $i){
                 $pid=(int)$i['product_id'];$qty=(float)$i['quantity'];$lock->execute([$biz,$pid]);$p=$lock->fetch();$lock->closeCursor();
-                if(!$p||$i['sale_unit']!=='unidad'||$p['sale_unit']!=='unidad'||!serialControlled($db,$biz,$pid)||$qty<1||$qty>500||floor($qty)!==$qty)fail('La reserva desde cotización solo admite equipos serializados activos, 1 a 500 unidades enteras por línea. No se admiten cotizaciones mixtas ni reservas parciales todavía.',422);
-                serialReconcile($db,$biz,$pid,(float)$p['stock_qty']);serialRequireFree($db,$biz,$pid,$wid,$qty);
+                if(!$p||$i['sale_unit']!==$p['sale_unit'])fail('Producto inactivo o unidad de venta modificada.',409);
+                $controlled=serialControlled($db,$biz,$pid);
+                if($qty<=0||$qty>1000000000||abs($qty*1000-round($qty*1000))>0.00001||($p['sale_unit']==='unidad'&&floor($qty)!==$qty))fail('Cantidad de reserva inválida.',422);
+                if($controlled){
+                    if($p['sale_unit']!=='unidad'||$qty>500)fail('Los productos serializados requieren cantidades enteras de hasta 500 unidades por línea.',422);
+                    serialReconcile($db,$biz,$pid,(float)$p['stock_qty']);
+                }
+                serialRequireFree($db,$biz,$pid,$wid,$qty);
             }
             $s=$db->prepare('INSERT INTO serial_reservations(business_id,warehouse_id,client_id,client_name,created_by,request_id,payload_hash,note,quote_id) VALUES(?,?,?,?,?,?,?,?,?)');
             $s->execute([$biz,$wid,$q['client_id'],$q['customer_name'],$uid,$rid,$hash,$note,$qid]);$resId=(int)$db->lastInsertId();
             $s=$db->prepare('INSERT INTO serial_reservation_items(reservation_id,business_id,product_id,quantity) VALUES(?,?,?,?)');
-            foreach($items as $i)$s->execute([$resId,$biz,(int)$i['product_id'],(int)$i['quantity']]);
+            foreach($items as $i)$s->execute([$resId,$biz,(int)$i['product_id'],$i['quantity']]);
             $s=$db->prepare("UPDATE quotes SET status='reserved',revision=revision+1 WHERE business_id=? AND id=? AND status='accepted'");$s->execute([$biz,$qid]);if($s->rowCount()!==1)fail('La cotización cambió.',409);
             quoteEvent($db,$biz,$qid,$uid,'reserved','accepted','reserved',$note?:null,['reservation_id'=>$resId,'warehouse_id'=>$wid,'total_clp'=>(int)$q['total_clp']],$rid,$hash);
             $db->commit();return respond($response,['ok'=>true,'quote_id'=>$qid,'reservation_id'=>$resId],201);
@@ -343,7 +349,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
                 $s->execute([$biz,$qid,$resId]);$r=$s->fetch();$s->closeCursor();
                 if(!$r||$warehouse!==(int)$r['warehouse_id']||(int)$r['client_id']!==(int)$quote['client_id'])fail('La reserva no corresponde a cotización, cliente o bodega.',409);
                 $s=$db->prepare('SELECT product_id,quantity FROM serial_reservation_items WHERE business_id=? AND reservation_id=? ORDER BY product_id FOR UPDATE');
-                $s->execute([$biz,$resId]);foreach($s->fetchAll() as $r)$reserved[(int)$r['product_id']]=(int)$r['quantity'];$s->closeCursor();
+                $s->execute([$biz,$resId]);foreach($s->fetchAll() as $r)$reserved[(int)$r['product_id']]=(float)$r['quantity'];$s->closeCursor();
                 if(!$reserved)fail('Reserva sin productos.',409);
             }
             if($quote['client_id']===null)fail('La cotización debe tener un cliente registrado.',422);
@@ -369,13 +375,13 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
                 if($p['sale_unit']!==$item['sale_unit'])fail('Un producto cambió de unidad. Revisa la cotización.',409);
                 if($qty<=0||(float)$p['stock_qty']+0.00001<$qty)fail('Stock total insuficiente para '.$p['name'],409);
                 $controlled=serialControlled($db,$biz,$pid);
-                if($resId!==null&&(!$controlled||!isset($reserved[$pid])||(float)$reserved[$pid]!==$qty))fail('Las cantidades o productos no coinciden con la reserva.',409);
+                if($resId!==null&&(!isset($reserved[$pid])||abs($reserved[$pid]-$qty)>0.00001))fail('Las cantidades o productos no coinciden con la reserva.',409);
                 if($controlled){
                     $controlledIds[$pid]=true;
                     if($p['sale_unit']!=='unidad'||$qty!==(float)count($series[$pid]??[]))throw new HttpError('Selecciona exactamente una serie por unidad de '.$p['name'].'.',422,'serial_numbers');
                     serialReconcile($db,$biz,$pid,(float)$p['stock_qty']);
-                    serialRequireFree($db,$biz,$pid,$saleLocation,$qty,$resId);
                 }
+                serialRequireFree($db,$biz,$pid,$saleLocation,$qty,$resId);
             }
             if(array_diff_key($series,$controlledIds))fail('Se enviaron series para productos no serializados o ajenos a la cotización.',422);
             // Cotización numerada, una sola venta por conversión (bloqueo de su fila).
@@ -392,7 +398,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             foreach($items as $item){
                 $pid=(int)$item['product_id'];$qty=(float)$item['quantity'];
                 // El precio se obtiene exclusivamente de quote_items, no de la solicitud o del catálogo.
-                $next=isset($controlledIds[$pid])?titoSellSerialLocationStock($db,$biz,$pid,$saleLocation,$qty):titoApplyLocationStock($db,$biz,$pid,$saleLocation,-$qty);
+                $next=isset($controlledIds[$pid])?titoSellSerialLocationStock($db,$biz,$pid,$saleLocation,$qty,$resId):titoApplyLocationStock($db,$biz,$pid,$saleLocation,-$qty,$resId);
                 $insert->execute([$sid,$pid,$item['product_name_snapshot'],$item['quantity'],$item['unit_price_clp'],$item['list_price_clp'],$item['discount_reason'],$item['subtotal_clp']]);
                 $lineId=(int)$db->lastInsertId();
                 if(isset($controlledIds[$pid])){

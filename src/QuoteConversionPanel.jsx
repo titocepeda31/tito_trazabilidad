@@ -42,7 +42,7 @@ export default function QuoteConversionPanel({data,request,notify,locations,init
   const saving=useRef(false),reserveRequest=useRef(null);
   const [note,setNote]=useState('');
   const serialLines=data.items.filter(i=>Number(i.serial_control)===1);
-  const eligible=serialLines.length===data.items.length&&serialLines.length>0&&serialLines.every(i=>Number.isInteger(Number(i.quantity))&&Number(i.quantity)>0&&Number(i.quantity)<=500);
+  const eligible=data.items.length>0&&data.items.every(i=>{const n=Number(i.quantity),controlled=Number(i.serial_control)===1;return Number.isFinite(n)&&n>0&&n<=1000000000&&Math.abs(n*1000-Math.round(n*1000))<=0.00001&&(i.sale_unit!=='unidad'||Number.isInteger(n))&&(!controlled||(i.sale_unit==='unidad'&&n<=500));});
   const complete=isReserve?eligible:serialLines.every(i=>Number.isInteger(Number(i.quantity))&&Number(i.quantity)<=500&&Number(i.quantity)>0&&(series[i.product_id]||[]).length===Number(i.quantity));
   function changeWarehouse(v){
     if(Object.values(series).some(a=>a.length)&&!window.confirm('Cambiar de bodega eliminará las series seleccionadas. ¿Continuar?'))return;
@@ -50,7 +50,7 @@ export default function QuoteConversionPanel({data,request,notify,locations,init
   }
   async function submit(){
     if(saving.current||!complete||!warehouse||confirmedSale||!data.quote.client_id)return;
-    if(!uncertain&&!window.confirm(isReserve?'¿Reservar todas las unidades de la cotización #'+data.quote.id+'? No se cobrará ni descontará stock físico.':'¿Confirmar la venta completa de la cotización #'+data.quote.id+' por '+pesos(data.quote.total_clp)+'? Verifica que las series correspondan a los equipos que entregarás.'))return;
+    if(!uncertain&&!window.confirm(isReserve?'¿Reservar todas las unidades de la cotización #'+data.quote.id+'? No se cobrará ni descontará stock físico.':'¿Confirmar la venta completa de la cotización #'+data.quote.id+' por '+pesos(data.quote.total_clp)+'? Verifica cantidades y, si corresponde, las series de los equipos que entregarás.'))return;
     saving.current=true;setBusy(true);setError('');
     try{
       let body;
@@ -82,7 +82,7 @@ export default function QuoteConversionPanel({data,request,notify,locations,init
     <section className="panel pad formstack">
       {error&&<p role="alert" className="warning-box">{error}</p>}
       {confirmedSale?<><strong>{isReserve?'Reserva':'Venta'} #{confirmedSale} registrada.</strong><button type="button" className="primary" disabled={busy} onClick={onCheck}>Consultar cotización</button></>:<>
-      {!complete&&<p className="helper">{isReserve?'Solo cotizaciones íntegramente serializadas de hasta 500 unidades por línea.':'Selecciona exactamente todas las series requeridas.'}</p>}
+      {!complete&&<p className="helper">{isReserve?'Revisa las cantidades: unidades enteras, hasta tres decimales para peso/volumen y máximo 500 equipos por línea serializada.':'Selecciona exactamente todas las series requeridas.'}</p>}
       <button type="button" className="primary wide" disabled={busy||!complete||!warehouse||!data.quote.client_id} onClick={submit}>{busy?'Confirmando…':uncertain?'Reintentar la misma operación':isReserve?'Confirmar reserva':'Confirmar venta y descontar stock'}</button>
       {(uncertain||error)&&<button type="button" className="ghost" disabled={busy} onClick={onCheck}>Consultar estado de cotización</button>}
       <p className="helper">{isReserve?'La reserva conserva los precios acordados hasta despacho o cancelación. No genera venta, cobro ni DTE.':'La confirmación registra venta y caja, series y movimientos en una sola transacción. No emite DTE.'}</p></>}

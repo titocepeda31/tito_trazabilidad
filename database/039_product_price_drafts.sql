@@ -1,0 +1,28 @@
+-- 039: preparación de precios CLP/UF por producto. No modifica el catálogo operativo.
+CREATE TABLE IF NOT EXISTS maderas7_ttrazabilidad.product_price_drafts (
+ id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+ business_id BIGINT UNSIGNED NOT NULL,
+ product_id BIGINT UNSIGNED NULL,
+ sku VARCHAR(50) NULL,
+ barcode VARCHAR(50) NULL,
+ product_name VARCHAR(120) NOT NULL,
+ price_unit ENUM('CLP','UF') NOT NULL,
+ source_amount DECIMAL(15,4) NOT NULL,
+ source_basis ENUM('gross','net') NOT NULL,
+ tax_treatment ENUM('vat19','exempt','non_taxable') NOT NULL,
+ final_amount DECIMAL(17,6) NOT NULL,
+ uf_rate_id BIGINT UNSIGNED NULL,
+ reference_date DATE NULL,
+ reference_clp BIGINT UNSIGNED NULL,
+ request_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+ row_index SMALLINT UNSIGNED NOT NULL,
+ payload_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+ created_by BIGINT UNSIGNED NOT NULL,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE KEY uq_price_draft_request(business_id,request_id,row_index),
+ KEY idx_price_draft_product(business_id,product_id,id),
+ FOREIGN KEY (business_id) REFERENCES maderas7_ttrazabilidad.businesses(id),
+ FOREIGN KEY (product_id) REFERENCES maderas7_ttrazabilidad.products(id),
+ FOREIGN KEY (uf_rate_id) REFERENCES maderas7_ttrazabilidad.business_uf_rates(id),
+ FOREIGN KEY (created_by) REFERENCES maderas7_ttrazabilidad.users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

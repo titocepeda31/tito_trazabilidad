@@ -31,7 +31,7 @@ function titoCurrencyRate(PDO $db,int $biz,string $day):?array {
 }
 function registerCurrencyUnitRoutes(RouteCollectorProxy $group):void {
     $group->get('/currency/settings',static function(Request $request,Response $response):Response{
-        $a=adminOnly($request);return respond($response,['settings'=>titoCurrencySettings(db(),(int)$a['business_id']),'today'=>quoteToday(),'publication_limit'=>titoUfPublishedThrough(quoteToday()),'publication_period'=>titoUfPeriod(quoteToday()),'operational_enabled'=>false]);
+        $a=adminOnly($request);return respond($response,['settings'=>titoCurrencySettings(db(),(int)$a['business_id']),'today'=>quoteToday(),'publication_limit'=>titoUfPublishedThrough(quoteToday()),'publication_period'=>titoUfPeriod(quoteToday()),'catalog_commercial_enabled'=>titoCommercialReady(db()),'operational_enabled'=>false]);
     });
     $group->post('/currency/settings',static function(Request $request,Response $response):Response{
         $a=adminOnly($request);$b=requestBody($request);$u=$b['default_unit']??null;$both=$b['allow_both']??null;

@@ -11,7 +11,8 @@ function registerCatalogMaintenanceRoutes(RouteCollectorProxy $group): void {
         $admin=adminOnly($request);
         $biz=(int)$admin['business_id']; $uid=(int)$admin['id'];$id=(int)$args['id'];
         $b=requestBody($request);
-        $allowed=['name','sku','barcode','price_clp','generate_missing_sku'];
+        $allowed=['name','sku','barcode','price_clp','generate_missing_sku','commercial_price'];
+        if(array_key_exists('commercial_price',$b)&&array_key_exists('price_clp',$b))fail('No envíes dos precios distintos.',422);
         $autoSku=$b['generate_missing_sku']??false;if(!is_bool($autoSku))fail('Opción de SKU inválida.',422);
         if(!array_intersect($allowed,array_keys($b)))fail('No hay cambios.',422);
         foreach(array_keys($b) as $field){if(!in_array($field,$allowed,true))fail('Campo de producto no editable: '.$field,422);}
@@ -22,7 +23,11 @@ function registerCatalogMaintenanceRoutes(RouteCollectorProxy $group): void {
             $st->execute([$id,$biz]);$original=$st->fetch();$st->closeCursor();
             if(!$original)fail('Producto no encontrado.',404);
             $old=['name'=>(string)$original['name'],'sku'=>$original['sku'],'barcode'=>$original['barcode'],'price_clp'=>(int)$original['price_clp']];
-            $next=$old;
+            $next=$old;$previousCommercial=titoCommercialLatest($db,$biz,$id);$commercial=null;
+            if(array_key_exists('commercial_price',$b)){
+                $commercial=titoCommercialPrepare($db,$biz,$b['commercial_price'],$id);
+                $next['price_clp']=$commercial['reference_clp'];
+            }elseif(array_key_exists('price_clp',$b)&&($previousCommercial['price_unit']??'CLP')==='UF')fail('Edita el precio UF desde su unidad comercial.',409);
             if(array_key_exists('name',$b))$next['name']=requireString($b,'name',120);
             if(array_key_exists('price_clp',$b))$next['price_clp']=integerPrice($b['price_clp']);
             foreach(['sku','barcode'] as $field){
@@ -34,9 +39,11 @@ function registerCatalogMaintenanceRoutes(RouteCollectorProxy $group): void {
             }
             if($autoSku&&$next['sku']===null)$next['sku']=$old['sku']??productAutoSku($db,$biz);
             if($next['sku']===null && $next['barcode']===null)fail('Ingresa SKU o código de barras, o activa la generación automática.',422);
-            if($old===$next){$db->commit();return respond($response,['ok'=>true,'changed'=>false,'product_id'=>$id]);}
+            if($old===$next&&!$commercial){$db->commit();return respond($response,['ok'=>true,'changed'=>false,'product_id'=>$id]);}
+            if($commercial)titoCommercialRecord($db,$biz,$id,$uid,$commercial);
             $st=$db->prepare('UPDATE products SET name=?,sku=?,barcode=?,price_clp=? WHERE id=? AND business_id=?');
             $st->execute([$next['name'],$next['sku'],$next['barcode'],$next['price_clp'],$id,$biz]);
+            if($commercial){$old['commercial_price']=$previousCommercial;$next['commercial_price']=$commercial;}
             $st=$db->prepare('INSERT INTO product_changes(business_id,product_id,changed_by,old_values_json,new_values_json) VALUES(?,?,?,?,?)');
             $st->execute([$biz,$id,$uid,json_encode($old,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE),json_encode($next,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE)]);
             $db->commit();

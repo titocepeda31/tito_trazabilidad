@@ -19,6 +19,7 @@ import OrganizationPanel from './OrganizationPanel.jsx';
 import SalesPointsPanel from './SalesPointsPanel.jsx';
 import OriginCatalogPanel from './OriginCatalogPanel.jsx';
 import SerialsPanel from './SerialsPanel.jsx';
+import TraceabilityPanel from './TraceabilityPanel.jsx';
 import ReservationsPanel from './ReservationsPanel.jsx';
 import PlatformPanel from './PlatformPanel.jsx';
 import RolesPanel from './RolesPanel.jsx';
@@ -62,6 +63,7 @@ const menu = [
   { key: 'puntosventa', label: 'Puntos de venta', ico: '▣' },
   { key: 'origen', label: 'Fabricantes y proveedores', ico: '▧' },
   { key: 'series', label: 'Números de serie', ico: '#' },
+  { key: 'trazabilidad', label: 'Trazabilidad', ico: '◎' },
   { key: 'usuarios', label: 'Usuarios', ico: '♙' },
   { key: 'roles', label: 'Roles y permisos', ico: '⚿' },
   { key: 'cuenta', label: 'Mi cuenta', ico: '♙' }
@@ -72,6 +74,7 @@ function App() {
   const [user, setUser] = useState(() => { try { return JSON.parse(sessionStorage.getItem('tito_user') || 'null'); } catch { return null; } });
   const [staffPermissions,setStaffPermissions] = useState({can_approve_discounts:false,can_sell_credit:false});
   const [page, setPage] = useState('inicio');
+  const [traceUnitId,setTraceUnitId]=useState(null);
   const [creatingSaleClient,setCreatingSaleClient]=useState(false),[saleClientResult,setSaleClientResult]=useState(null);
   const [newSaleRequest,setNewSaleRequest] = useState(0);
   const [terminalVersion,setTerminalVersion]=useState(0);
@@ -271,7 +274,7 @@ function App() {
   const pendingApprovals=approvalRequests.filter(r=>r.status==='pending').length;
   const canApproveDiscounts=isAdmin||staffPermissions.can_approve_discounts;
   const canSellCredit=isAdmin||staffPermissions.can_sell_credit;
-  const visibleMenu = isAdmin ? menu : menu.filter(m => !['importar','usuarios','recepciones','cotizaciones','bodegas','devoluciones','servicio','garantias','clientes','organizacion','roles','puntosventa','origen','series'].includes(m.key) && (m.key!=='aprobaciones'||canApproveDiscounts));
+  const visibleMenu = isAdmin ? menu : menu.filter(m => !['importar','usuarios','recepciones','cotizaciones','bodegas','devoluciones','servicio','garantias','clientes','organizacion','roles','puntosventa','origen','series','trazabilidad'].includes(m.key) && (m.key!=='aprobaciones'||canApproveDiscounts));
   const critical = products.filter(p => Number(p.stock_qty) <= 5);
   const stockValue = products.reduce((total,p) => total + Number(p.stock_qty) * Number(p.price_clp), 0);
   const dateCL = d => d.toLocaleDateString('sv-SE', {timeZone:'America/Santiago'});
@@ -295,7 +298,7 @@ function App() {
       <aside className="sidebar">
         <div className="brand"><span className="brand-box">T</span><span>Tito <strong>POS</strong><small>Panel comercial</small></span></div>
         <div className="sidebar-tag">ESPACIO DE TRABAJO</div>
-        <nav>{visibleMenu.map(item => <button key={item.key} className={'navitem ' + (page === item.key ? 'selected' : '')} onClick={() => setPage(item.key)}><span>{item.ico}</span>{item.label}{item.key==='aprobaciones'&&pendingApprovals>0&&<span className="approval-count">{pendingApprovals}</span>}</button>)}</nav>
+        <nav>{visibleMenu.map(item => <button key={item.key} className={'navitem ' + (page === item.key ? 'selected' : '')} onClick={() => {if(item.key==='trazabilidad')setTraceUnitId(null);setPage(item.key);}}><span>{item.ico}</span>{item.label}{item.key==='aprobaciones'&&pendingApprovals>0&&<span className="approval-count">{pendingApprovals}</span>}</button>)}</nav>
         <div className="sidebar-bottom"><div className="shop-card"><span className="shop-dot"/ ><div><strong>{user?.business_name || 'Mi negocio'}</strong><small>{user?.email || ''}</small></div></div><button className="small-link" onClick={logout}>Cerrar sesión ↗</button></div>
       </aside>
       <div className="content-shell"><header className="topbar"><div><div className="topbar-kicker">TITO POS / {menu.find(m=>m.key===page)?.label.toUpperCase()||'MÁS'}</div><strong>{user?.business_name || 'Mi negocio'}</strong></div><div className="top-right">{canApproveDiscounts&&pendingApprovals>0&&<button className="approval-top-action" type="button" onClick={()=>setPage('aprobaciones')}>🔔 {pendingApprovals} pendiente{pendingApprovals!==1?'s':''}</button>}<span className="connection"><i className={serverOk?'':'off'}/> {serverOk?'API conectada':'API por comprobar'}</span><button className="ghost mini" onClick={()=>refresh(true)} disabled={loading}>{loading?'Actualizando…':'↻ Actualizar'}</button></div></header>
@@ -333,7 +336,8 @@ function App() {
         {page==='organizacion' && isAdmin && <OrganizationPanel request={request} notify={notify} />}
         {page==='puntosventa' && isAdmin && <SalesPointsPanel request={request}/>}
         {page==='origen' && isAdmin && <OriginCatalogPanel request={request}/>}
-        {page==='series' && isAdmin && <SerialsPanel request={request} onChange={refresh}/>}
+        {page==='trazabilidad' && isAdmin && <TraceabilityPanel request={request} initialUnitId={traceUnitId} onBack={traceUnitId?()=>{setTraceUnitId(null);setPage('series');}:undefined}/>}
+        {page==='series' && isAdmin && <SerialsPanel request={request} onChange={refresh} onOpenTrace={id=>{setTraceUnitId(id);setPage('trazabilidad');}}/>}
         {page==='usuarios' && isAdmin && <UsersPanel request={request} notify={notify} ownId={Number(user?.id)} />}
         {page==='roles' && isAdmin && <RolesPanel request={request} />}
         {page==='cuenta' && <AccountPanel user={user} request={request} notify={notify} onPasswordChanged={()=>{endSession();setPage('inicio');notify('Contraseña actualizada. Inicia sesión nuevamente.','success');}} />}
@@ -344,7 +348,7 @@ function App() {
         {page==='clientes' && isAdmin && <ClientsPanel request={request} notify={notify} onChange={()=>refresh(false)} createForSale={creatingSaleClient} onSaleClientDone={c=>{setCreatingSaleClient(false);if(c)setSaleClientResult(c);setPage('vender');}} />}
         {page==='cotizaciones' && isAdmin && <QuotesPanel products={products} request={request} notify={notify} onSale={()=>refresh(true)} businessName={user?.business_name||'Tito POS'} />}
         {page==='aprobaciones' && canApproveDiscounts && <RemoteApprovalsPanel requests={approvalRequests} request={request} notify={notify} onRefresh={refreshApprovals} loading={approvalLoading} canManagePush={isAdmin} />}
-        {page==='mas' && <div className="more-page"><div className="section-intro"><div><p className="eyebrow">OPERACIONES</p><h2>Más herramientas</h2><p className="muted">Módulos de administración y control de inventario.</p></div></div><div className="more-menu">{visibleMenu.filter(m=>!['inicio','inventario','vender','ventas'].includes(m.key)).map(m=><button type="button" key={m.key} className="panel pad more-option" onClick={()=>setPage(m.key)}><span>{m.ico}</span><strong>{m.label}{m.key==='aprobaciones'&&pendingApprovals>0?' ('+pendingApprovals+')':''}</strong><span>→</span></button>)}</div></div>}
+        {page==='mas' && <div className="more-page"><div className="section-intro"><div><p className="eyebrow">OPERACIONES</p><h2>Más herramientas</h2><p className="muted">Módulos de administración y control de inventario.</p></div></div><div className="more-menu">{visibleMenu.filter(m=>!['inicio','inventario','vender','ventas'].includes(m.key)).map(m=><button type="button" key={m.key} className="panel pad more-option" onClick={()=>{if(m.key==='trazabilidad')setTraceUnitId(null);setPage(m.key);}}><span>{m.ico}</span><strong>{m.label}{m.key==='aprobaciones'&&pendingApprovals>0?' ('+pendingApprovals+')':''}</strong><span>→</span></button>)}</div></div>}
       </main></div>
       <nav className="bottom-nav">{visibleMenu.filter(m=>['inicio','inventario','vender','ventas'].includes(m.key)).map(item=><button key={item.key} className={page===item.key?'active':''} onClick={()=>setPage(item.key)}><span>{item.ico}</span>{item.label}</button>)}<button className={page==='mas'||!['inicio','inventario','vender','ventas'].includes(page)?'active':''} onClick={()=>setPage('mas')}><span>⋯</span>Más</button></nav>
     </div>}

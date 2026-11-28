@@ -38,6 +38,7 @@ require __DIR__ . '/../private/dte_tax.php';
 require __DIR__ . '/../private/currency_units.php';
 require __DIR__ . '/../private/uf_official.php';
 require __DIR__ . '/../private/product_price_drafts.php';
+require __DIR__ . '/../private/commercial_prices.php';
 require __DIR__ . '/../private/habitual_credit.php';
 require __DIR__ . '/../private/client_import.php';
 require __DIR__ . '/../private/credit_operations.php';
@@ -164,7 +165,8 @@ $app->group('', static function(RouteCollectorProxy $group): void {
         $biz=(int)$request->getAttribute('currentUser')['business_id'];
         $st=db()->prepare('SELECT p.id,p.name,p.sku,p.barcode,p.price_clp,p.sale_unit,p.stock_qty,p.is_active,(c.product_id IS NOT NULL) AS serial_control FROM products p LEFT JOIN serial_product_controls c ON c.product_id=p.id AND c.business_id=p.business_id WHERE p.business_id=? AND p.is_active=1 ORDER BY p.name,p.id LIMIT 1000');
         $st->execute([$biz]);
-        return respond($response,['products'=>$st->fetchAll()]);
+        $rows=$st->fetchAll();$st->closeCursor();
+        return respond($response,['products'=>titoCommercialAttach(db(),$biz,$rows)]);
     });
     $group->post('/products/import',static function(Request $request,Response $response): Response {
         $user=adminOnly($request);
@@ -178,7 +180,8 @@ $app->group('', static function(RouteCollectorProxy $group): void {
         $biz=(int)$user['business_id'];$uid=(int)$user['id'];
         $b=requestBody($request);
         $name=requireString($b,'name');
-        $price=integerPrice($b['price_clp']??null);
+        $commercialRequested=array_key_exists('commercial_price',$b);
+        $price=$commercialRequested?null:integerPrice($b['price_clp']??null);
         $unit=$b['sale_unit']??'unidad';
         if(!in_array($unit,['unidad','kg','litro'],true))fail('Unidad inválida.',422);
         $stock=decimalQuantity($b['stock_qty']??0,false,$unit!=='unidad');
@@ -195,10 +198,13 @@ $app->group('', static function(RouteCollectorProxy $group): void {
             $db->beginTransaction();
             originLockCompany($db,$biz);
             if($autoSku&&$sku===null)$sku=productAutoSku($db,$biz);
+            $commercial=$commercialRequested?titoCommercialPrepare($db,$biz,$b['commercial_price']):null;
+            if($commercial)$price=$commercial['reference_clp'];
             titoProductCreationActor($db,$biz,$uid,'manual');
             $st=$db->prepare('INSERT INTO products(business_id,name,sku,barcode,price_clp,sale_unit,stock_qty) VALUES (?,?,?,?,?,?,?)');
             $st->execute([$biz,$name,$sku,$barcode,$price,$unit,$stock]);
             $id=(int)$db->lastInsertId();
+            if($commercial)titoCommercialRecord($db,$biz,$id,$uid,$commercial);
             if((float)$stock>0)move($db,$biz,$id,null,$uid,'initial',$stock,$stock,'Stock inicial');
             $db->commit();
             return respond($response,['ok'=>true,'product_id'=>$id,'sku'=>$sku],201);
@@ -386,6 +392,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
     registerDteTaxRoutes($group);
     registerCurrencyUnitRoutes($group);
     registerProductPriceDraftRoutes($group);
+    registerCommercialPriceRoutes($group);
     registerReservationRoutes($group);
     registerCatalogMaintenanceRoutes($group);
     registerLabelRoutes($group);

@@ -79,7 +79,79 @@ function freeExchangeOrigin(PDO $db,int $biz,int $sale,int $unit):array {
     $s=$db->prepare('SELECT 1 FROM serial_sale_units WHERE business_id=? AND unit_id=? AND sale_id>? LIMIT 1');$s->execute([$biz,$unit,$sale]);$later=$s->fetchColumn();$s->closeCursor();if($later)fail('La serie tiene una venta posterior.',409);
     $a['root_unit_id']=$unit;$a['delivered_on']=substr($a['created_at'],0,10);return $a;
 }
+// The most recent retention event identifies the physical hold cycle.
+function holdOrigin(PDO $db,int $biz,int $unit): array {
+    $s=$db->prepare("SELECT id,event_type,details FROM serial_unit_events WHERE business_id=? AND unit_id=? AND event_type IN ('warranty_return','exchange_received') ORDER BY id DESC LIMIT 1");$s->execute([$biz,$unit]);$r=$s->fetch();$s->closeCursor();
+    if(!$r)fail('No existe origen de retención verificable.',409);
+    $r['source']=json_decode($r['details'],true,512,JSON_THROW_ON_ERROR);return $r;
+}
+function holdResolutionComplete(PDO $db,int $biz,int $unit,array $origin):bool {
+    $d=$origin['source'];
+    if($origin['event_type']==='exchange_received'){
+        $s=$db->prepare('SELECT 1 FROM warranty_free_exchanges e JOIN sales s ON s.id=e.sale_id AND s.business_id=e.business_id WHERE e.business_id=? AND e.id=? AND e.returned_unit_id=? AND s.status=?');$s->execute([$biz,$d['exchange_id']??0,$unit,'completed']);$ok=$s->fetchColumn();$s->closeCursor();return (bool)$ok;
+    }
+    // Credit adjustments and unresolved repairs/exchanges require a separate reconciliation.
+    if(empty($d['return_id'])||empty($d['sale_id']))return false;
+    $s=$db->prepare("SELECT cr.resolution,cr.refund_status FROM customer_returns cr JOIN serial_sale_reversals rv ON rv.return_id=cr.id AND rv.business_id=cr.business_id AND rv.sale_id=cr.sale_id WHERE cr.business_id=? AND cr.id=? AND cr.sale_id=? AND rv.unit_id=? AND rv.reversal_kind='warranty'");
+    $s->execute([$biz,$d['return_id'],$d['sale_id'],$unit]);$r=$s->fetch();$s->closeCursor();
+    if(!$r)return false;if($r['resolution']==='refund')return $r['refund_status']==='confirmed';
+    if($r['resolution']!=='exchange')return false;
+    $s=$db->prepare("SELECT 1 FROM warranty_replacements r JOIN sales n ON n.id=r.replacement_sale_id AND n.business_id=r.business_id WHERE r.business_id=? AND r.original_sale_id=? AND r.original_unit_id=? AND n.status='completed'");$s->execute([$biz,$d['sale_id'],$unit]);$ok=$s->fetchColumn();$s->closeCursor();return (bool)$ok;
+}
+function holdViewSql():string {
+    return "SELECT x.id AS unit_id,x.serial_number,x.status,x.warehouse_id,p.name AS product_name,w.name AS warehouse_name,m.name AS manufacturer_name,sp.name AS supplier_name,(SELECT MAX(e.id) FROM serial_unit_events e WHERE e.business_id=x.business_id AND e.unit_id=x.id AND e.event_type IN ('warranty_return','exchange_received')) AS hold_event_id FROM serial_units x JOIN products p ON p.id=x.product_id AND p.business_id=x.business_id JOIN warehouses w ON w.id=x.warehouse_id AND w.business_id=x.business_id LEFT JOIN product_origins po ON po.product_id=p.id AND po.business_id=x.business_id LEFT JOIN manufacturers m ON m.id=po.manufacturer_id AND m.business_id=x.business_id LEFT JOIN suppliers sp ON sp.id=x.supplier_id AND sp.business_id=x.business_id";
+}
+function registerHoldRoutes(RouteCollectorProxy $group):void {
+    $group->get('/service/held-units',static function(Request $request,Response $response):Response{
+        $a=adminOnly($request);$biz=(int)$a['business_id'];$p=$request->getQueryParams();$q=$p['q']??'';$filter=$p['filter']??'active';$page=filter_var($p['page']??1,FILTER_VALIDATE_INT,['options'=>['min_range'=>1,'max_range'=>100000]]);
+        if($page===false||!is_string($q)||mb_strlen($q)>120||!in_array($filter,['active','history'],true))fail('Filtro inválido.',422);
+        $where=$filter==='active'?" WHERE x.business_id=? AND x.status IN ('warranty_hold','warranty_manufacturer')":" WHERE x.business_id=? AND EXISTS(SELECT 1 FROM serial_unit_events e WHERE e.business_id=x.business_id AND e.unit_id=x.id AND e.event_type IN ('warranty_return','exchange_received'))";$params=[$biz];
+        if(trim($q)!==''){$where.=" AND (LOCATE(?,x.serial_number)>0 OR LOCATE(?,p.name)>0 OR LOCATE(?,COALESCE(m.name,''))>0)";$params=array_merge($params,[mb_strtoupper(trim($q),'UTF-8'),trim($q),trim($q)]);}
+        $s=db()->prepare(holdViewSql().$where.' ORDER BY x.id DESC LIMIT 26 OFFSET '.(($page-1)*25));$s->execute($params);$rows=$s->fetchAll();$s->closeCursor();return respond($response,['rows'=>array_slice($rows,0,25),'more'=>count($rows)>25]);
+    });
+    $group->get('/service/held-units/{id:[0-9]+}',static function(Request $request,Response $response,array $args):Response{
+        $a=adminOnly($request);$biz=(int)$a['business_id'];$unit=(int)$args['id'];$db=db();
+        $s=$db->prepare(holdViewSql().' WHERE x.business_id=? AND x.id=?');$s->execute([$biz,$unit]);$row=$s->fetch();$s->closeCursor();if(!$row||!$row['hold_event_id'])fail('Equipo sin retención registrada.',404);
+        $s=$db->prepare('SELECT e.id,e.hold_event_id,e.action,e.from_status,e.to_status,e.recipient,e.note,e.evidence_reference,e.created_at,u.email AS actor_email FROM warranty_hold_events e JOIN users u ON u.id=e.actor_id AND u.business_id=e.business_id WHERE e.business_id=? AND e.unit_id=? ORDER BY e.id DESC');$s->execute([$biz,$unit]);$events=$s->fetchAll();$s->closeCursor();
+        $origin=holdOrigin($db,$biz,$unit);$s=$db->prepare("SELECT id FROM service_cases WHERE business_id=? AND COALESCE(physical_unit_id,unit_id)=? AND status<>'closed' LIMIT 1");$s->execute([$biz,$unit]);$open=$s->fetchColumn();$s->closeCursor();
+        return respond($response,['unit'=>$row,'events'=>$events,'origin'=>$origin,'resolution_complete'=>holdResolutionComplete($db,$biz,$unit,$origin),'open_case_id'=>$open?:null]);
+    });
+    $group->post('/service/held-units/{id:[0-9]+}/events',static function(Request $request,Response $response,array $args):Response{
+        $a=adminOnly($request);$biz=(int)$a['business_id'];$uid=(int)$a['id'];$unit=(int)$args['id'];$b=requestBody($request);
+        if(array_diff(array_keys($b),['request_id','hold_event_id','expected_status','expected_last_event_id','action','recipient','note','evidence_reference','physical_confirmed','quality_confirmed']))fail('Campos no permitidos.',422);
+        $rid=titoCreditUuid($b['request_id']??null);$originId=originId($b['hold_event_id']??null,'hold_event_id');$last=originId($b['expected_last_event_id']??null,'expected_last_event_id');$from=$b['expected_status']??null;$action=$b['action']??null;$recipient=serviceText($b,'recipient',150,false);$note=warrantyText($b,'note',1000);$ref=warrantyText($b,'evidence_reference',250);
+        if(!$originId||!in_array($from,['warranty_hold','warranty_manufacturer'],true)||!in_array($action,['review','send_manufacturer','receive_manufacturer','restock','retire'],true))fail('Acción o estado inválido.',422);
+        if($action==='send_manufacturer'&&!$recipient)fail('Identifica el fabricante o servicio receptor.',422);
+        if($action!=='review'&&($b['physical_confirmed']??null)!==true)fail('Confirma el movimiento o disposición física efectiva.',422);
+        if($action==='restock'&&($b['quality_confirmed']??null)!==true)fail('Se requiere liberación de calidad documentada.',422);
+        $hash=hash('sha256',json_encode([$uid,$unit,$originId,$last,$from,$action,$recipient,$note,$ref,$b['physical_confirmed']??false,$b['quality_confirmed']??false],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
+        $db=db();$db->beginTransaction();try{originLockCompany($db,$biz);
+            $s=$db->prepare('SELECT id,payload_hash FROM warranty_hold_events WHERE business_id=? AND request_id=?');$s->execute([$biz,$rid]);$old=$s->fetch();$s->closeCursor();if($old){if(!hash_equals($old['payload_hash'],$hash))fail('Solicitud reutilizada.',409);$db->commit();return respond($response,['ok'=>true,'event_id'=>(int)$old['id'],'already_recorded'=>true]);}
+            $s=$db->prepare('SELECT id,product_id,warehouse_id,status FROM serial_units WHERE business_id=? AND id=? FOR UPDATE');$s->execute([$biz,$unit]);$x=$s->fetch();$s->closeCursor();if(!$x||$x['status']!==$from)fail('Estado del equipo cambió.',409);
+            $origin=holdOrigin($db,$biz,$unit);if((int)$origin['id']!==$originId)fail('Cambió el ciclo de retención.',409);
+            $s=$db->prepare('SELECT MAX(id) FROM warranty_hold_events WHERE business_id=? AND unit_id=?');$s->execute([$biz,$unit]);$latest=$s->fetchColumn();$s->closeCursor();if(($latest===null?null:(int)$latest)!==$last)fail('Historial actualizado por otro usuario.',409);
+            $allowed=['warranty_hold'=>['review','send_manufacturer','restock','retire'],'warranty_manufacturer'=>['review','receive_manufacturer']];if(!in_array($action,$allowed[$from],true))fail('Transición no permitida.',409);
+            if($action!=='review'){
+                $s=$db->prepare("SELECT id FROM service_cases WHERE business_id=? AND COALESCE(physical_unit_id,unit_id)=? AND status<>'closed' LIMIT 1 FOR UPDATE");$s->execute([$biz,$unit]);$open=$s->fetchColumn();$s->closeCursor();if($open)fail('Existe un caso técnico abierto: coordina su resolución antes de cambiar la custodia o disponibilidad.',409);
+            }
+            if(in_array($action,['restock','retire'],true)&&!holdResolutionComplete($db,$biz,$unit,$origin))fail('Resolución con el cliente no verificada; conserva retenido hasta conciliar.',409);
+            $warehouse=(int)$x['warehouse_id'];$pid=(int)$x['product_id'];$to=match($action){'send_manufacturer'=>'warranty_manufacturer','receive_manufacturer'=>'warranty_hold','restock'=>'in_stock','retire'=>'warranty_retired',default=>$from};
+            $after=null;
+            if($action==='restock'){
+                $s=$db->prepare('SELECT id FROM warehouses WHERE id=? AND business_id=? AND is_active=1 FOR UPDATE');$s->execute([$warehouse,$biz]);$active=$s->fetchColumn();$s->closeCursor();if(!$active)fail('Bodega de retorno inactiva.',409);
+                $s=$db->prepare('SELECT stock_qty,is_active,sale_unit FROM products WHERE business_id=? AND id=? FOR UPDATE');$s->execute([$biz,$pid]);$p=$s->fetch();$s->closeCursor();if(!$p||!(int)$p['is_active']||$p['sale_unit']!=='unidad'||!serialControlled($db,$biz,$pid))fail('Producto no habilitado para reincorporación.',409);
+                serialReconcile($db,$biz,$pid,(float)$p['stock_qty']);$after=titoRestoreSerialLocationStock($db,$biz,$pid,$warehouse,1.0);
+            }
+            if($to!==$from){$s=$db->prepare('UPDATE serial_units SET status=? WHERE business_id=? AND id=? AND status=?');$s->execute([$to,$biz,$unit,$from]);if($s->rowCount()!==1)fail('Cambió el estado.',409);}
+            $s=$db->prepare('INSERT INTO warranty_hold_events(business_id,unit_id,hold_event_id,warehouse_id,action,from_status,to_status,recipient,note,evidence_reference,actor_id,request_id,payload_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)');$s->execute([$biz,$unit,$originId,$warehouse,$action,$from,$to,$recipient,$note,$ref,$uid,$rid,$hash]);$id=(int)$db->lastInsertId();
+            if($after!==null){move($db,$biz,$pid,null,$uid,'adjustment','1.000',$after,'Liberación de retenido #'.$id);serialReconcile($db,$biz,$pid,(float)$after);}
+            $s=$db->prepare("INSERT INTO serial_unit_events(business_id,unit_id,actor_id,event_type,details) VALUES(?,?,?,?,?)");$s->execute([$biz,$unit,$uid,'hold_'.$action,json_encode(['hold_action_id'=>$id,'hold_event_id'=>$originId,'warehouse_id'=>$warehouse,'from_status'=>$from,'to_status'=>$to,'recipient'=>$recipient,'reason'=>$note,'evidence_reference'=>$ref],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE)]);
+            $db->commit();return respond($response,['ok'=>true,'event_id'=>$id],201);
+        }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
+    });
+}
 function registerServiceRoutes(RouteCollectorProxy $group): void {
+    registerHoldRoutes($group);
     $group->get('/service/free-exchanges',static function(Request $request,Response $response):Response{
         $a=adminOnly($request);$biz=(int)$a['business_id'];$p=$request->getQueryParams();$q=$p['q']??'';$page=filter_var($p['page']??1,FILTER_VALIDATE_INT,['options'=>['min_range'=>1,'max_range'=>100000]]);
         if($page===false||!is_string($q)||mb_strlen($q)>120)fail('Filtro inválido.',422);

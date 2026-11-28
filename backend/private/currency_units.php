@@ -31,7 +31,7 @@ function titoCurrencyRate(PDO $db,int $biz,string $day):?array {
 }
 function registerCurrencyUnitRoutes(RouteCollectorProxy $group):void {
     $group->get('/currency/settings',static function(Request $request,Response $response):Response{
-        $a=adminOnly($request);return respond($response,['settings'=>titoCurrencySettings(db(),(int)$a['business_id']),'today'=>quoteToday(),'operational_enabled'=>false]);
+        $a=adminOnly($request);return respond($response,['settings'=>titoCurrencySettings(db(),(int)$a['business_id']),'today'=>quoteToday(),'publication_limit'=>titoUfPublishedThrough(quoteToday()),'publication_period'=>titoUfPeriod(quoteToday()),'operational_enabled'=>false]);
     });
     $group->post('/currency/settings',static function(Request $request,Response $response):Response{
         $a=adminOnly($request);$b=requestBody($request);$u=$b['default_unit']??null;$both=$b['allow_both']??null;
@@ -41,14 +41,30 @@ function registerCurrencyUnitRoutes(RouteCollectorProxy $group):void {
         return respond($response,['settings'=>titoCurrencySettings($db,(int)$a['business_id']),'operational_enabled'=>false]);
     });
     $group->get('/currency/uf',static function(Request $request,Response $response):Response{
-        $a=adminOnly($request);$day=titoCurrencyDay($request->getQueryParams()['date']??quoteToday());$r=titoCurrencyRate(db(),(int)$a['business_id'],$day);
+        $a=adminOnly($request);$day=titoUfRangeDay($request->getQueryParams()['date']??quoteToday());$r=titoCurrencyRate(db(),(int)$a['business_id'],$day);
         return respond($response,['date'=>$day,'rate'=>$r]);
     });
-    $group->post('/currency/uf/sync',static function(Request $request,Response $response):Response{
-        $a=adminOnly($request);$b=requestBody($request);$day=titoCurrencyDay($b['date']??null);$refresh=$b['refresh']??false;
+    $group->get('/currency/uf/coverage',static function(Request $request,Response $response):Response{
+        $a=adminOnly($request);$p=$request->getQueryParams();$from=titoUfRangeDay($p['from']??null);$to=titoUfRangeDay($p['to']??null);
+        return respond($response,titoUfCoverage(db(),(int)$a['business_id'],$from,$to));
+    });
+    $group->post('/currency/uf/sync-range',static function(Request $request,Response $response):Response{
+        $a=adminOnly($request);$b=requestBody($request);$from=titoUfRangeDay($b['from']??null);$to=titoUfRangeDay($b['to']??null);$refresh=$b['refresh']??false;
         if(!is_bool($refresh))fail('Opción de actualización inválida.',422);
-        $result=titoUfEnsure(db(),(int)$a['business_id'],(int)$a['id'],$day,$refresh);
-        return respond($response,$result);
+        return respond($response,titoUfSyncRange(db(),(int)$a['business_id'],(int)$a['id'],$from,$to,$refresh));
+    });
+    $group->post('/currency/uf/sync',static function(Request $request,Response $response):Response{
+        $a=adminOnly($request);$b=requestBody($request);$day=titoUfRangeDay($b['date']??null);$refresh=$b['refresh']??false;
+        if(!is_bool($refresh))fail('Opción de actualización inválida.',422);
+        $db=db();$biz=(int)$a['business_id'];
+        if($refresh)return respond($response,titoUfEnsure($db,$biz,(int)$a['id'],$day,true));
+        $rate=titoCurrencyRate($db,$biz,$day);
+        if($rate)return respond($response,['rate'=>$rate,'cached'=>true]);
+        [$from,$to]=titoUfPeriod($day);$to=min($to,titoUfPublishedThrough(quoteToday()));$from=max($from,'2000-01-01');
+        $result=titoUfSyncRange($db,$biz,(int)$a['id'],$from,$to);
+        $rate=titoCurrencyRate($db,$biz,$day);
+        if(!$rate)fail('Fecha aún no disponible en la publicación oficial. Se guardaron los demás días disponibles.',409);
+        return respond($response,['rate'=>$rate,'cached'=>false,'coverage'=>$result]);
     });
     $group->post('/currency/uf',static function(Request $request,Response $response):Response{
         $a=adminOnly($request);$b=requestBody($request);$day=titoCurrencyDay($b['date']??null);
@@ -66,7 +82,7 @@ function registerCurrencyUnitRoutes(RouteCollectorProxy $group):void {
         }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
     });
     $group->post('/currency/preview',static function(Request $request,Response $response):Response{
-        $a=adminOnly($request);$b=requestBody($request);$day=titoCurrencyDay($b['date']??null);$amount=$b['amount']??null;
+        $a=adminOnly($request);$b=requestBody($request);$day=titoUfRangeDay($b['date']??null);$amount=$b['amount']??null;
         if(!is_string($amount))fail('Monto UF inválido.',422);
         $rate=titoCurrencyRate(db(),(int)$a['business_id'],$day);
         if(!$rate)fail('No existe UF registrada para esa fecha. No se usará un valor de otro día.',409);

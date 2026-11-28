@@ -15,6 +15,7 @@ import ClientsPanel from './ClientsPanel.jsx';
 import FinancialSummary from './FinancialSummary.jsx';
 import ManagementDashboard from './ManagementDashboard.jsx';
 import LabelsPanel from './LabelsPanel.jsx';
+import SerialOpeningPanel from './SerialOpeningPanel.jsx';
 import WarehousesPanel from './WarehousesPanel.jsx';
 import AccountPanel from './AccountPanel.jsx';
 import OrganizationPanel from './OrganizationPanel.jsx';
@@ -50,6 +51,7 @@ const menu = [
   { key: 'inventario', label: 'Inventario', ico: '▤' },
   { key: 'importar', label: 'Importar', ico: '⇧' },
   { key: 'etiquetas', label: 'Etiquetas', ico: '▤' },
+  { key: 'apertura', label: 'Inventario inicial', ico: '⇥' },
   { key: 'recepciones', label: 'Mercadería', ico: '▣' },
   { key: 'bodegas', label: 'Bodegas', ico: '▤' },
   { key: 'terminal', label: 'Identificación de caja', ico: '⌁' },
@@ -277,7 +279,7 @@ function App() {
   const pendingApprovals=approvalRequests.filter(r=>r.status==='pending').length;
   const canApproveDiscounts=isAdmin||staffPermissions.can_approve_discounts;
   const canSellCredit=isAdmin||staffPermissions.can_sell_credit;
-  const visibleMenu = isAdmin ? menu : menu.filter(m => !['importar','usuarios','recepciones','cotizaciones','bodegas','devoluciones','servicio','garantias','clientes','organizacion','roles','puntosventa','origen','series','trazabilidad','etiquetas'].includes(m.key) && (m.key!=='aprobaciones'||canApproveDiscounts));
+  const visibleMenu = isAdmin ? menu : menu.filter(m => !['importar','usuarios','recepciones','cotizaciones','bodegas','devoluciones','servicio','garantias','clientes','organizacion','roles','puntosventa','origen','series','trazabilidad','etiquetas','apertura'].includes(m.key) && (m.key!=='aprobaciones'||canApproveDiscounts));
   const critical = products.filter(p => Number(p.stock_qty) <= 5);
   const stockValue = products.reduce((total,p) => total + Number(p.stock_qty) * Number(p.price_clp), 0);
   const dateCL = d => d.toLocaleDateString('sv-SE', {timeZone:'America/Santiago'});
@@ -314,6 +316,7 @@ function App() {
         </>}
         {page==='inventario' && <Inventory products={products} onChange={()=>refresh(false)} request={request} notify={notify} canManage={isAdmin} onOpenHistory={()=>setPage('auditoria')} />}
         {page==='auditoria' && isAdmin && <InventoryHistory request={request} notify={notify} products={products} onBack={()=>setPage('inventario')} />}
+        {page==='apertura' && isAdmin && <SerialOpeningPanel request={request} notify={notify} onChange={()=>refresh(false)}/>}
         {page==='etiquetas' && isAdmin && <LabelsPanel request={request}/>}
         {page==='importar' && <ImportPanel request={request} refresh={()=>refresh(false)} notify={notify} />}
         {page==='recepciones' && isAdmin && <ReceiptsPanel products={products} request={request} onChange={()=>refresh(false)} notify={notify} />}

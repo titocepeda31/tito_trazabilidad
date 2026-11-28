@@ -19,6 +19,7 @@ require __DIR__ . '/../private/organization.php';
 require __DIR__ . '/../private/sales_points.php';
 require __DIR__ . '/../private/origin_catalog.php';
 require __DIR__ . '/../private/serials.php';
+require __DIR__ . '/../private/serial_opening.php';
 require __DIR__ . '/../private/reservations.php';
 require __DIR__ . '/../private/platform.php';
 require __DIR__ . '/../private/catalog_maintenance.php';
@@ -370,6 +371,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
     registerSalesPointRoutes($group);
     registerOriginCatalogRoutes($group);
     registerSerialRoutes($group);
+    registerSerialOpeningRoutes($group);
     registerTraceabilityRoutes($group);
     registerDashboardRoutes($group);
     registerReservationRoutes($group);

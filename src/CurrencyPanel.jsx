@@ -1,15 +1,14 @@
 import React,{useEffect,useState} from 'react';
-import {pesos} from './api';
-import ProductPriceDraftPanel from './ProductPriceDraftPanel.jsx';
+import {convertCurrencyReference} from './currency-converter.mjs';
 
 const ufFormat=new Intl.NumberFormat('es-CL',{minimumFractionDigits:2,maximumFractionDigits:2});
 const officialSource='Banco Central de Chile — BDE F073.UFF.PRE.Z.D';
 
 export default function CurrencyPanel({request}){
- const [checking,setChecking]=useState(false),[manualOpen,setManualOpen]=useState(false);
- const [settings,setSettings]=useState(null),[date,setDate]=useState(''),[today,setToday]=useState(''),[rate,setRate]=useState(null),[value,setValue]=useState(''),[source,setSource]=useState(''),[amount,setAmount]=useState(''),[preview,setPreview]=useState(null),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[error,setError]=useState('');
+ const [checking,setChecking]=useState(false),[manualOpen,setManualOpen]=useState(false),[direction,setDirection]=useState('CLP');
+ const [settings,setSettings]=useState(null),[date,setDate]=useState(''),[today,setToday]=useState(''),[rate,setRate]=useState(null),[value,setValue]=useState(''),[source,setSource]=useState(''),[amount,setAmount]=useState(''),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[error,setError]=useState('');
  useEffect(()=>{let active=true;request('/currency/settings').then(r=>{if(active){setSettings({...r.settings,allow_both:Number(r.settings.allow_both)===1});setDate(r.today);setToday(r.today);}}).catch(e=>{if(active)setError(e.message);});return()=>{active=false;};},[request]);
- useEffect(()=>{if(!date)return;let active=true;setRate(null);setPreview(null);setManualOpen(false);setValue('');setSource('');setError('');setMessage('');setChecking(true);
+ useEffect(()=>{if(!date)return;let active=true;setRate(null);setManualOpen(false);setValue('');setSource('');setError('');setMessage('');setChecking(true);
   request('/currency/uf?date='+encodeURIComponent(date)).then(async r=>{
    if(!active)return;
    if(r.rate){setRate(r.rate);return;}
@@ -19,17 +18,18 @@ export default function CurrencyPanel({request}){
   return()=>{active=false;};},[date,request]);
  async function run(action){setBusy(true);setError('');setMessage('');try{await action();}catch(e){setError(e.message);}finally{setBusy(false);}}
  function saveSettings(e){e.preventDefault();run(async()=>{const r=await request('/currency/settings',{method:'POST',body:{default_unit:settings.default_unit,allow_both:settings.allow_both}});setSettings({...r.settings,allow_both:Number(r.settings.allow_both)===1});setMessage('Preferencia guardada.');});}
- function refreshOfficial(){run(async()=>{const r=await request('/currency/uf/sync',{method:'POST',body:{date,refresh:true}});setRate(r.rate);setPreview(null);setMessage(r.cached?'Valor oficial ya registrado.':'Valor oficial registrado como nueva versión.');});}
- function saveRate(e){e.preventDefault();run(async()=>{const r=await request('/currency/uf',{method:'POST',body:{date,clp_per_uf:value.trim().replace(',','.'),source_reference:source}});setRate(r.rate);setPreview(null);setValue('');setSource('');setManualOpen(false);setMessage('Valor de respaldo registrado como nueva versión.');});}
- function convert(e){e.preventDefault();run(async()=>{setPreview(null);const r=await request('/currency/preview',{method:'POST',body:{date,amount:amount.trim().replace(',','.')}});setPreview(r);});}
+ function refreshOfficial(){run(async()=>{const r=await request('/currency/uf/sync',{method:'POST',body:{date,refresh:true}});setRate(r.rate);setMessage(r.cached?'Valor oficial ya registrado.':'Valor oficial registrado como nueva versión.');});}
+ function saveRate(e){e.preventDefault();run(async()=>{const r=await request('/currency/uf',{method:'POST',body:{date,clp_per_uf:value.trim().replace(',','.'),source_reference:source}});setRate(r.rate);setValue('');setSource('');setManualOpen(false);setMessage('Valor de respaldo registrado como nueva versión.');});}
  const currentRate=rate?.rate_on===date?rate:null;
  const isOfficial=currentRate?.source_reference===officialSource;
  const rateLabel=currentRate?ufFormat.format(Number(currentRate.clp_per_uf)):'';
+ let conversion=null,conversionError='';
+ if(currentRate&&amount.trim()&&!checking&&!busy){try{conversion=convertCurrencyReference(amount,direction,currentRate.clp_per_uf);}catch(e){conversionError=e.message;}}
  return <><div className="section-intro"><div><p className="eyebrow">CONFIGURACIÓN COMERCIAL</p><h2>Pesos y Unidad de Fomento</h2><p className="muted">Preferencias y valores diarios por empresa.</p></div></div>
  <section className="panel pad"><p className="warning-box">Fase de preparación: la configuración no modifica el catálogo, cotizaciones, ventas ni DTE. La UF se consulta al seleccionar la fecha si no existe registro. El ingreso manual queda como respaldo.</p>
  {error&&<p role="alert">{error}</p>}{message&&<p role="status">{message}</p>}
  {settings&&<form className="formstack" onSubmit={saveSettings}><h3>Preferencias</h3><label>Unidad predeterminada<select value={settings.default_unit} disabled={busy} onChange={e=>setSettings({...settings,default_unit:e.target.value})}><option value="CLP">Pesos chilenos (CLP)</option><option value="UF">UF</option></select></label><label className="staff-switch" style={{display:'flex',alignItems:'center',gap:10}}><input type="checkbox" style={{width:18,height:18,minHeight:18,flex:'0 0 18px',accentColor:'#078d6c',margin:0}} checked={settings.allow_both} disabled={busy} onChange={e=>setSettings({...settings,allow_both:e.target.checked})}/> <span>Permitir ambas unidades (cuando se habiliten operaciones)</span></label><button className="primary" disabled={busy}>Guardar preferencia</button></form>}
- </section><section className="panel pad"><h3>Valor diario de la UF</h3><label>Fecha de referencia<input type="date" value={date} max={today} disabled={busy} onChange={e=>{setDate(e.target.value);setRate(null);setPreview(null);}}/></label>
+ </section><section className="panel pad"><h3>Valor diario de la UF</h3><label>Fecha de referencia<input type="date" value={date} max={today} disabled={busy} onChange={e=>{setDate(e.target.value);setRate(null);}}/></label>
  <div style={{display:'grid',gap:12,marginTop:16}}>
  <label>{isOfficial?'Valor oficial de la UF (CLP)':'Valor registrado de la UF (CLP)'}<input readOnly value={rateLabel} placeholder={checking?'Consultando…':'Sin valor registrado'} aria-label="Valor registrado de la UF en pesos" style={{background:'#f5f8f7',fontSize:'1.3rem',fontWeight:700,fontVariantNumeric:'tabular-nums'}}/></label>
  {checking?<p role="status" className="muted">Consultando valor UF…</p>:currentRate?<div role="status"><span className={'pill '+(isOfficial?'green':'amber')}>{isOfficial?'✓ Sincronizado desde Banco Central':'Valor de respaldo manual / no verificado automáticamente'}</span><p className="helper" style={{overflowWrap:'anywhere'}}>Fuente: {currentRate.source_reference} · versión {currentRate.id}.</p></div>:<p className="muted">Sin valor registrado para la fecha. No se realizarán conversiones.</p>}
@@ -37,5 +37,11 @@ export default function CurrencyPanel({request}){
  <button type="button" className="text-button" style={{textAlign:'left',whiteSpace:'normal'}} disabled={busy||checking||!date} aria-expanded={manualOpen} aria-controls="uf-manual-backup" onClick={()=>{setManualOpen(v=>!v);setValue('');setSource('');}}>{manualOpen?'Ocultar ingreso manual':'Ingresar valor manual de respaldo'}</button>
  {manualOpen&&<form id="uf-manual-backup" className="formstack" onSubmit={saveRate}><p className="warning-box">Usa esta opción solo si necesitas registrar un valor verificado de la fecha seleccionada. El ingreso crea una nueva versión y no se identifica como sincronización oficial.</p><label>CLP por UF<input required inputMode="decimal" value={value} onChange={e=>setValue(e.target.value)} disabled={busy||checking}/></label><label>Fuente / referencia<input required maxLength={242} value={source} onChange={e=>setSource(e.target.value)} disabled={busy||checking}/></label><button className="primary" disabled={busy||checking||!date}>Registrar respaldo manual</button></form>}
  </div></section>
- <section className="panel pad"><h3>Simular conversión</h3><form className="formstack" onSubmit={convert}><label>Monto UF<input required inputMode="decimal" value={amount} disabled={busy} onChange={e=>{setAmount(e.target.value);setPreview(null);}}/></label><button className="primary" disabled={busy||checking||!currentRate}>Calcular</button></form>{preview&&<p role="status"><strong>{preview.amount} UF = {pesos(preview.total_clp)}</strong> · {preview.rate.rate_on} · versión {preview.rate.id}. Solo referencia.</p>}</section>{settings&&<ProductPriceDraftPanel request={request} today={today} defaultUnit={settings.default_unit}/>}</>;
+ <section className="panel pad"><h3>Conversor UF / CLP</h3><p className="muted">Calculadora de referencia; no cambia precios ni ventas. Usa el valor registrado para la fecha seleccionada.</p>
+ <div className="formstack">
+ <label>¿Qué deseas convertir?<select value={direction} onChange={e=>{setDirection(e.target.value);setAmount('');}}><option value="CLP">Pesos a UF</option><option value="UF">UF a pesos</option></select></label>
+ <label>{direction==='CLP'?'Monto en pesos (CLP)':'Monto en UF'}<input inputMode={direction==='CLP'?'numeric':'decimal'} value={amount} onChange={e=>setAmount(e.target.value)} placeholder={direction==='CLP'?'Ej. 25000':'Ej. 10,5'}/></label>
+ <small className="helper">Sin separadores de miles. {direction==='UF'?'Hasta 4 decimales.':'Solo pesos enteros.'}</small>
+ {!currentRate||checking?<p className="warning-box">Selecciona una fecha con valor UF registrado para convertir.</p>:conversionError?<p role="alert" className="error-inline">{conversionError}</p>:conversion?<div className="success-summary" role="status"><small>Equivalente referencial</small><h2 style={{margin:'6px 0',overflowWrap:'anywhere'}}>{conversion.output}</h2><p>{conversion.input} · UF: {rateLabel} CLP · {currentRate.rate_on} · versión {currentRate.id}</p></div>:<p className="muted">Ingresa un monto para ver la conversión automáticamente.</p>}
+ </div></section></>;
 }

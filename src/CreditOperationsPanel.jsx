@@ -15,6 +15,9 @@ export default function CreditOperationsPanel({account,request,notify,onChange})
   const [busy,setBusy]=useState(false);
   const [kind,setKind]=useState('commercial');
   const [qty,setQty]=useState({});
+  const [returnSeries,setReturnSeries]=useState({}),[voidSeries,setVoidSeries]=useState({});
+  const availableSeries=i=>(i.serial_units||[]).filter(u=>u.reversal_kind===null&&u.status==='sold');
+  function toggleSeries(setter,id,n){setter(old=>({...old,[id]:(old[id]||[]).includes(n)?old[id].filter(v=>v!==n):[...(old[id]||[]),n]}));}
   const [reason,setReason]=useState('');
   const [received,setReceived]=useState(false);
   const [voidReason,setVoidReason]=useState('');
@@ -33,7 +36,7 @@ export default function CreditOperationsPanel({account,request,notify,onChange})
   const active=account.status==='active';
   const lines=info?.items||[];
   const anyReturns=(info?.adjustments||[]).length>0;
-  const selected=lines.map(i=>({...i,returnQty:Number(qty[i.sale_item_id]||0)})).filter(i=>i.returnQty>0);
+  const selected=lines.map(i=>({...i,returnQty:i.serial_units?.length?(returnSeries[i.sale_item_id]||[]).length:Number(qty[i.sale_item_id]||0)})).filter(i=>i.returnQty>0);
   const selectedTotal=selected.reduce((sum,i)=>sum+Math.round(i.returnQty*Number(i.unit_price_clp)),0);
   function canSubmit(){return !busy&&!pending;}
   async function submitOperation(body){
@@ -43,7 +46,7 @@ export default function CreditOperationsPanel({account,request,notify,onChange})
       const path=type==='return'?'/returns':type==='void'?'/void':'/refunds';
       const result=await request('/credit/accounts/'+id+path,{method:'POST',body:payload});
       sessionStorage.removeItem(pendingKey);setPending(null);
-      setQty({});setReason('');setReceived(false);setVoidConfirmed(false);setVoidReason('');setRefundAmount('');setRefundReference('');
+      setQty({});setReturnSeries({});setVoidSeries({});setReason('');setReceived(false);setVoidConfirmed(false);setVoidReason('');setRefundAmount('');setRefundReference('');
       if(type==='return')notify('Devolución de crédito registrada: '+pesos(result.amount_clp)+'. Pendiente por cobrar: '+pesos(result.balance_clp)+'. A favor del cliente: '+pesos(result.refund_due_clp)+'.','success');
       if(type==='void')notify('Venta a crédito anulada. Mercadería repuesta y deuda ajustada; verifica posibles reembolsos pendientes.','success');
       if(type==='refund')notify('Reembolso externo registrado. Saldo a devolver: '+pesos(result.refund_due_clp)+'.','success');
@@ -76,14 +79,15 @@ export default function CreditOperationsPanel({account,request,notify,onChange})
     schedule({
       type:'return',id:accountId,request_id:newId(),
       return_kind:kind,reason:reason.trim(),inspection_confirmed:true,
-      items:selected.map(i=>({sale_item_id:Number(i.sale_item_id),quantity:i.returnQty}))
+      items:selected.map(i=>({sale_item_id:Number(i.sale_item_id),quantity:i.returnQty})),serial_items:selected.filter(i=>i.serial_units?.length).map(i=>({sale_item_id:Number(i.sale_item_id),serial_numbers:returnSeries[i.sale_item_id]||[]}))
     });
   }
   function submitVoid(e){
     e.preventDefault();if(!canSubmit()||!active)return;
     if(voidReason.trim().length<5||!voidConfirmed){notify('Confirma recuperación física de toda la mercadería y motivo.','error');return;}
+    if(lines.some(i=>i.serial_units?.length&&(voidSeries[i.sale_item_id]||[]).length!==Number(i.quantity))){notify('Identifica todas las series recuperadas.','error');return;}
     if(!window.confirm('ANULAR venta #'+account.sale_id+' COMPLETA: reponer todos sus productos al local, ajustar toda la deuda y registrar los abonos previos como dinero que corresponde devolver. ¿Continuar?'))return;
-    schedule({type:'void',id:accountId,request_id:newId(),reason:voidReason.trim(),inspection_confirmed:true});
+    schedule({type:'void',id:accountId,request_id:newId(),reason:voidReason.trim(),inspection_confirmed:true,serial_items:lines.filter(i=>i.serial_units?.length).map(i=>({sale_item_id:Number(i.sale_item_id),serial_numbers:voidSeries[i.sale_item_id]||[]}))});
   }
   function submitRefund(e){
     e.preventDefault();if(!canSubmit())return;
@@ -115,6 +119,7 @@ export default function CreditOperationsPanel({account,request,notify,onChange})
       <div className="credit-returns-lines">
         {lines.map(i=>{
           const available=Math.max(0,Number(i.quantity)-Number(i.returned_qty));
+          if(i.serial_units?.length)return <div key={i.sale_item_id}><strong>{i.product_name_snapshot} · Selecciona las series recuperadas</strong>{availableSeries(i).map(u=><label key={u.unit_id} className="credit-toggle"><input type="checkbox" disabled={busy||!!pending} checked={(returnSeries[i.sale_item_id]||[]).includes(u.serial_number)} onChange={()=>toggleSeries(setReturnSeries,i.sale_item_id,u.serial_number)}/>{u.serial_number}</label>)}{!availableSeries(i).length&&<p>Sin series disponibles.</p>}</div>;
           return <label key={i.sale_item_id}>{i.product_name_snapshot} · Disponible para devolución {available} {i.sale_unit} · {pesos(i.unit_price_clp)}/unidad
             <input type="number" step={i.sale_unit==='unidad'?'1':'0.001'} min="0" max={available} value={qty[i.sale_item_id]||''} disabled={busy||!!pending||available===0} onChange={e=>setQty(p=>({...p,[i.sale_item_id]:e.target.value}))} placeholder="Cantidad"/>
           </label>;
@@ -127,6 +132,7 @@ export default function CreditOperationsPanel({account,request,notify,onChange})
     {info&&active&&<form className="formstack credit-operation-form" onSubmit={submitVoid}>
       <h4>Anular toda la venta a crédito</h4>
       <p className="warning-box">Solo disponible si no tiene devoluciones anteriores. Es necesario recuperar TODOS los productos en condiciones aptas para reventa. Si el cliente ya pagó, se generará un saldo a favor que deberá reembolsarse por separado.</p>
+      {!anyReturns&&lines.filter(i=>i.serial_units?.length).map(i=><div key={i.sale_item_id}><strong>{i.product_name_snapshot} · Confirma cada serie recuperada</strong>{availableSeries(i).map(u=><label key={u.unit_id} className="credit-toggle"><input type="checkbox" checked={(voidSeries[i.sale_item_id]||[]).includes(u.serial_number)} disabled={busy||!!pending} onChange={()=>toggleSeries(setVoidSeries,i.sale_item_id,u.serial_number)}/>{u.serial_number}</label>)}</div>)}
       <label>Motivo<input maxLength={250} minLength={5} value={voidReason} disabled={busy||!!pending||anyReturns} onChange={e=>setVoidReason(e.target.value)} placeholder="Ej. Venta registrada por error"/></label>
       <label className="credit-toggle"><input type="checkbox" checked={voidConfirmed} disabled={busy||!!pending||anyReturns} onChange={e=>setVoidConfirmed(e.target.checked)}/> Confirmo que recuperé toda la mercadería apta para reventa</label>
       <button className="ghost wide danger-button" disabled={!canSubmit()||anyReturns||!voidConfirmed}>Anular venta completa y regularizar deuda</button>

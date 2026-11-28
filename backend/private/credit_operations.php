@@ -41,13 +41,25 @@ function titoCreditAdjustmentItems(array $body): array {
     ksort($wanted,SORT_NUMERIC);
     return $wanted;
 }
+function titoCreditSerialSpecs(mixed $rows): array {
+    if(!is_array($rows)||!array_is_list($rows)||count($rows)>80)fail('Selección de series inválida.',422);
+    $out=[];
+    foreach($rows as $row){
+        if(!is_array($row)||array_diff(array_keys($row),['sale_item_id','serial_numbers']))fail('Campos de series inválidos.',422);
+        $id=originId($row['sale_item_id']??null,'sale_item_id');
+        if(!$id||isset($out[$id]))fail('Línea repetida o inválida.',422);
+        $out[$id]=serialNormalizeList($row['serial_numbers']??null);
+        if(!$out[$id])fail('Selecciona series.',422);
+    }
+    ksort($out,SORT_NUMERIC);return $out;
+}
 function titoCreditAccountLock(PDO $db,int $biz,int $id): array {
     $st=$db->prepare('SELECT a.id,a.business_id,a.sale_id,a.client_id,a.status,a.original_total_clp,s.status AS sale_status FROM credit_accounts a JOIN sales s ON s.id=a.sale_id AND s.business_id=a.business_id WHERE a.business_id=? AND a.id=? FOR UPDATE');
     $st->execute([$biz,$id]);$a=$st->fetch();$st->closeCursor();
     if(!$a)fail('Cuenta a crédito no encontrada.',404);
     return $a;
 }
-function titoCreditAdjustmentLines(PDO $db,int $biz,int $saleId,array $wanted,string $kind): array {
+function titoCreditAdjustmentLines(PDO $db,int $biz,int $saleId,array $wanted,string $kind,array $series=[]): array {
     $st=$db->prepare('SELECT si.id,si.product_id,si.quantity,si.unit_price_clp,si.subtotal_clp,p.name,p.sale_unit,p.is_active,p.stock_qty FROM sale_items si JOIN products p ON p.id=si.product_id AND p.business_id=? WHERE si.sale_id=? ORDER BY si.id');
     $st->execute([$biz,$saleId]);$lines=$st->fetchAll();$st->closeCursor();
     $byId=[];foreach($lines as $line)$byId[(int)$line['id']]=$line;
@@ -55,6 +67,7 @@ function titoCreditAdjustmentLines(PDO $db,int $biz,int $saleId,array $wanted,st
     $st->execute([$biz,$saleId]);$prior=[];
     foreach($st->fetchAll() as $row)$prior[(int)$row['sale_item_id']]=$row;
     $st->closeCursor();
+    if(array_diff_key($series,$wanted))fail('Series de líneas no seleccionadas.',422);
     $out=[];$sum=0;
     foreach($wanted as $id=>$rawQty){
         if(!isset($byId[$id]))fail('El producto no pertenece a la venta.',422);
@@ -67,20 +80,36 @@ function titoCreditAdjustmentLines(PDO $db,int $biz,int $saleId,array $wanted,st
         $value=$qty>=$left-0.000001
           ? $remainingAmount
           : min($remainingAmount,(int)round($qty*(int)$line['unit_price_clp'],0,PHP_ROUND_HALF_UP));
-        $out[]=['line'=>$line,'qty'=>$qty,'rawQty'=>$rawQty,'amount'=>$value];
+        $pid=(int)$line['product_id'];$numbers=$series[$id]??[];
+        $units=serialSaleLineUnits($db,$biz,$saleId,(int)$id);
+        $controlled=serialControlled($db,$biz,$pid);
+        if($controlled||$units){
+            if(!$controlled||count($units)!==(int)$line['quantity']||floor($qty)!==$qty||count($numbers)!==(int)$qty)fail('Selecciona exactamente las series vendidas que se recuperan.',422);
+            $available=[];foreach($units as $unit)if($unit['reversal_kind']===null&&$unit['status']==='sold')$available[]=$unit['serial_number'];
+            if(array_diff($numbers,$available))fail('Serie no disponible para devolver en esta venta.',409);
+        }elseif($numbers)fail('Series de producto no serializado.',422);
+        $out[]=['line'=>$line,'qty'=>$qty,'rawQty'=>$rawQty,'amount'=>$value,'serial_numbers'=>$numbers];
         $sum+=$value;
         if($sum>1000000000000)fail('Total fuera de rango.',422);
     }
     if(!$out)fail('Sin productos para devolver.',422);
     return [$out,$sum,$lines,$prior];
 }
-function titoCreditRestore(PDO $db,int $biz,int $uid,int $saleId,int $adjustmentId,array $validated,bool $restock): void {
+function titoCreditRestore(PDO $db,int $biz,int $uid,int $saleId,int $adjustmentId,array $validated,bool $restock,string $kind,string $reason): void {
     $saleLocation=titoSaleHistoricalLocation($db,$biz,$saleId);
     $items=$db->prepare('INSERT INTO credit_adjustment_items(adjustment_id,sale_item_id,product_id,quantity,amount_clp,restocked) VALUES(?,?,?,?,?,?)');
     $stock=$db->prepare('SELECT id,is_active,name,sale_unit,stock_qty FROM products WHERE id=? AND business_id=? FOR UPDATE');
     foreach($validated as $v){
         $line=$v['line'];$pid=(int)$line['product_id'];
-        if($restock){
+        if($v['serial_numbers']){
+            $stock->execute([$pid,$biz]);$product=$stock->fetch();$stock->closeCursor();
+            if(!$product||(int)$product['is_active']!==1||$product['sale_unit']!==$line['sale_unit'])fail('Producto serializado inactivo o modificado.',409);
+            serialReconcile($db,$biz,$pid,(float)$product['stock_qty']);
+            serialRestoreUnits($db,['business_id'=>$biz,'id'=>$uid],$saleId,(int)$line['id'],$pid,$saleLocation,$v['serial_numbers'],$kind,null,$reason,$adjustmentId);
+            $balance=$restock?titoRestoreSerialLocationStock($db,$biz,$pid,$saleLocation,$v['qty']):$product['stock_qty'];
+            if($restock)move($db,$biz,$pid,null,$uid,'adjustment',number_format($v['qty'],3,'.',''),$balance,'Reversa serializada crédito #'.$adjustmentId.' · Venta #'.$saleId);
+            serialReconcile($db,$biz,$pid,(float)$balance);
+        }elseif($restock){
             $stock->execute([$pid,$biz]);$product=$stock->fetch();$stock->closeCursor();
             if(!$product||(int)$product['is_active']!==1||$product['sale_unit']!==$line['sale_unit']){
                 fail('No se puede restituir automáticamente el producto inactivo o modificado.',409);
@@ -217,7 +246,7 @@ function registerCreditOperationsRoutes(RouteCollectorProxy $group): void {
     });
     $group->get('/credit/accounts/{id:[0-9]+}/adjustments',static function(Request $request,Response $response,array $args):Response{
         $u=adminOnly($request);$biz=(int)$u['business_id'];$id=(int)$args['id'];$db=db();
-        $st=$db->prepare('SELECT id,status,original_total_clp FROM credit_accounts WHERE id=? AND business_id=?');$st->execute([$id,$biz]);$a=$st->fetch();$st->closeCursor();
+        $st=$db->prepare('SELECT id,status,original_total_clp,sale_id FROM credit_accounts WHERE id=? AND business_id=?');$st->execute([$id,$biz]);$a=$st->fetch();$st->closeCursor();
         if(!$a)fail('Cuenta no encontrada.',404);
         $st=$db->prepare('SELECT a.id,a.kind,a.return_kind,a.amount_clp,a.reason,a.created_at,u.email AS created_by_email FROM credit_adjustments a JOIN users u ON u.id=a.created_by WHERE a.business_id=? AND a.account_id=? ORDER BY a.id DESC');
         $st->execute([$biz,$id]);$adj=$st->fetchAll();$st->closeCursor();
@@ -225,12 +254,13 @@ function registerCreditOperationsRoutes(RouteCollectorProxy $group): void {
         $st->execute([$biz,$id]);$refunds=$st->fetchAll();$st->closeCursor();
         $st=$db->prepare('SELECT si.id AS sale_item_id,si.product_name_snapshot,si.quantity,si.unit_price_clp,si.subtotal_clp,p.sale_unit,COALESCE(ret.returned_qty,0) AS returned_qty FROM sale_items si JOIN credit_accounts ca ON ca.sale_id=si.sale_id AND ca.business_id=? JOIN products p ON p.id=si.product_id LEFT JOIN (SELECT ai.sale_item_id,SUM(ai.quantity) returned_qty FROM credit_adjustment_items ai GROUP BY ai.sale_item_id) ret ON ret.sale_item_id=si.id WHERE ca.id=? ORDER BY si.id');
         $st->execute([$biz,$id]);$lines=$st->fetchAll();$st->closeCursor();
+        foreach($lines as &$line){$line['serial_units']=serialSaleLineUnits($db,$biz,(int)$a['sale_id'],(int)$line['sale_item_id']);}unset($line);
         return respond($response,['adjustments'=>$adj,'refunds'=>$refunds,'items'=>$lines,'account_status'=>$a['status']]);
     });
     $group->post('/credit/accounts/{id:[0-9]+}/returns',static function(Request $request,Response $response,array $args):Response{
         $u=adminOnly($request);$biz=(int)$u['business_id'];$uid=(int)$u['id'];$id=(int)$args['id'];
         $b=requestBody($request);
-        if(array_diff(array_keys($b),['request_id','return_kind','reason','inspection_confirmed','items']))fail('Campos no permitidos.',422);
+        if(array_diff(array_keys($b),['request_id','return_kind','reason','inspection_confirmed','items','serial_items']))fail('Campos no permitidos.',422);
         $rid=titoCreditUuid($b['request_id']??null);
         $kind=$b['return_kind']??null;
         if(!in_array($kind,['commercial','warranty'],true))fail('Tipo inválido.',422);
@@ -238,10 +268,11 @@ function registerCreditOperationsRoutes(RouteCollectorProxy $group): void {
         $reason=titoCreditString($b,'reason',250,true);
         if(mb_strlen($reason)<5)fail('Describe el motivo (al menos cinco caracteres).',422);
         $wanted=titoCreditAdjustmentItems($b);
-        $hash=hash('sha256',json_encode([$id,$rid,'return',$kind,$reason,$wanted],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
+        $series=titoCreditSerialSpecs($b['serial_items']??[]);$canonical=[$id,$rid,'return',$kind,$reason,$wanted];if($series)$canonical[]=$series;
+        $hash=hash('sha256',json_encode($canonical,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
         $db=db();
         try{
-            $db->beginTransaction();
+            $db->beginTransaction();originLockCompany($db,$biz);
             $a=titoCreditAccountLock($db,$biz,$id);
             $st=$db->prepare('SELECT id,kind,payload_hash,amount_clp FROM credit_adjustments WHERE business_id=? AND request_id=?');
             $st->execute([$biz,$rid]);$prior=$st->fetch();$st->closeCursor();
@@ -252,14 +283,14 @@ function registerCreditOperationsRoutes(RouteCollectorProxy $group): void {
                 return respond($response,['ok'=>true,'adjustment_id'=>(int)$prior['id'],'amount_clp'=>(int)$prior['amount_clp'],'already_recorded'=>true]+$tot);
             }
             if($a['status']!=='active'||$a['sale_status']!=='completed')fail('Esta cuenta ya no permite devoluciones.',409);
-            [$lines,$amount]=titoCreditAdjustmentLines($db,$biz,(int)$a['sale_id'],$wanted,$kind);
+            [$lines,$amount]=titoCreditAdjustmentLines($db,$biz,(int)$a['sale_id'],$wanted,$kind,$series);
             if($amount<=0)fail('Una devolución a crédito debe tener importe positivo. Solicita revisión manual de líneas gratuitas.',422);
             $tot=titoCreditTotals($db,$biz,$id,(int)$a['original_total_clp']);
             if($amount>$tot['net_total_clp'])fail('La devolución excede el valor neto de la venta.',409);
             $st=$db->prepare("INSERT INTO credit_adjustments(business_id,account_id,created_by,request_id,payload_hash,kind,return_kind,reason,amount_clp) VALUES(?,?,?,?,?,'return',?,?,?)");
             $st->execute([$biz,$id,$uid,$rid,$hash,$kind,$reason,$amount]);
             $adjustmentId=(int)$db->lastInsertId();
-            titoCreditRestore($db,$biz,$uid,(int)$a['sale_id'],$adjustmentId,$lines,$kind==='commercial');
+            titoCreditRestore($db,$biz,$uid,(int)$a['sale_id'],$adjustmentId,$lines,$kind==='commercial',$kind,$reason);
             $tot=titoCreditTotals($db,$biz,$id,(int)$a['original_total_clp']);
             $db->commit();
             return respond($response,['ok'=>true,'adjustment_id'=>$adjustmentId,'amount_clp'=>$amount,'restocked'=>$kind==='commercial']+$tot,201);
@@ -268,15 +299,16 @@ function registerCreditOperationsRoutes(RouteCollectorProxy $group): void {
     $group->post('/credit/accounts/{id:[0-9]+}/void',static function(Request $request,Response $response,array $args):Response{
         $u=adminOnly($request);$biz=(int)$u['business_id'];$uid=(int)$u['id'];$id=(int)$args['id'];
         $b=requestBody($request);
-        if(array_diff(array_keys($b),['request_id','reason','inspection_confirmed']))fail('Campos no permitidos.',422);
+        if(array_diff(array_keys($b),['request_id','reason','inspection_confirmed','serial_items']))fail('Campos no permitidos.',422);
         $rid=titoCreditUuid($b['request_id']??null);
         if(($b['inspection_confirmed']??null)!==true)fail('Confirma que toda la mercadería fue recuperada y está apta para reventa.',422);
         $reason=titoCreditString($b,'reason',250,true);
         if(mb_strlen($reason)<5)fail('Indica un motivo de al menos cinco caracteres.',422);
-        $hash=hash('sha256',json_encode([$id,$rid,'void',$reason],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
+        $series=titoCreditSerialSpecs($b['serial_items']??[]);$canonical=[$id,$rid,'void',$reason];if($series)$canonical[]=$series;
+        $hash=hash('sha256',json_encode($canonical,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
         $db=db();
         try{
-            $db->beginTransaction();
+            $db->beginTransaction();originLockCompany($db,$biz);
             $a=titoCreditAccountLock($db,$biz,$id);
             $st=$db->prepare('SELECT id,payload_hash FROM credit_adjustments WHERE business_id=? AND request_id=?');$st->execute([$biz,$rid]);$prior=$st->fetch();$st->closeCursor();
             if($prior){
@@ -294,11 +326,11 @@ function registerCreditOperationsRoutes(RouteCollectorProxy $group): void {
             $st=$db->prepare('SELECT id,quantity FROM sale_items WHERE sale_id=? ORDER BY id');
             $st->execute([(int)$a['sale_id']]);$rows=$st->fetchAll();
             $wanted=[];foreach($rows as $row)$wanted[(int)$row['id']]=number_format((float)$row['quantity'],3,'.','');
-            [$lines,$amount]=titoCreditAdjustmentLines($db,$biz,(int)$a['sale_id'],$wanted,'commercial');
+            [$lines,$amount]=titoCreditAdjustmentLines($db,$biz,(int)$a['sale_id'],$wanted,'commercial',$series);
             if($amount!==(int)$a['original_total_clp'])fail('Diferencia entre el total vendido y los productos a reponer.',409);
             $st=$db->prepare("INSERT INTO credit_adjustments(business_id,account_id,created_by,request_id,payload_hash,kind,return_kind,reason,amount_clp) VALUES(?,?,?,?,?,'void','commercial',?,?)");
             $st->execute([$biz,$id,$uid,$rid,$hash,$reason,$amount]);$adjustmentId=(int)$db->lastInsertId();
-            titoCreditRestore($db,$biz,$uid,(int)$a['sale_id'],$adjustmentId,$lines,true);
+            titoCreditRestore($db,$biz,$uid,(int)$a['sale_id'],$adjustmentId,$lines,true,'void',$reason);
             $st=$db->prepare("UPDATE credit_accounts SET status='voided' WHERE id=? AND business_id=? AND status='active'");
             $st->execute([$id,$biz]);if($st->rowCount()!==1)throw new RuntimeException('No se actualizó el estado de la cuenta.');
             // El trigger solo permite anular crédito si la cuenta ya fue
@@ -322,7 +354,7 @@ function registerCreditOperationsRoutes(RouteCollectorProxy $group): void {
         $hash=hash('sha256',json_encode([$id,$amount,$method,$ref],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
         $db=db();
         try{
-            $db->beginTransaction();
+            $db->beginTransaction();originLockCompany($db,$biz);
             $a=titoCreditAccountLock($db,$biz,$id);
             $st=$db->prepare('SELECT id,payload_hash FROM credit_refunds WHERE business_id=? AND request_id=?');
             $st->execute([$biz,$rid]);$prior=$st->fetch();$st->closeCursor();

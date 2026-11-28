@@ -533,7 +533,6 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
                 $controlled=serialControlled($db,$biz,$pid);
                 if($p['sale_unit']==='unidad'&&floor($qty)!==$qty)fail('El producto requiere cantidades enteras.',422);
                 if($controlled){
-                    if($credit)fail('Venta a plazo de equipos serializados todavía no habilitada: falta integrar sus devoluciones y reversas.',409);
                     $controlledIds[$pid]=true;
                     if($p['sale_unit']!=='unidad'||$qty!==(float)count($series[$pid]??[]))throw new HttpError('Selecciona exactamente una serie por unidad de '.$p['name'].'.',422,'serial_numbers');
                     serialReconcile($db,$biz,$pid,(float)$p['stock_qty']);

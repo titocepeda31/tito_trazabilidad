@@ -77,23 +77,24 @@ function serialSaleRecord(PDO $db,array $actor,int $pid,int $warehouse,int $sale
 // Debe llamarse dentro de la transacción, tras bloquear empresa, venta y producto.
 // El retorno se identifica por pareja unidad/venta, no únicamente por serie.
 function serialSaleLineUnits(PDO $db,int $biz,int $sale,int $line): array {
-    $s=$db->prepare("SELECT x.id AS unit_id,x.serial_number,x.product_id,x.status,x.warehouse_id AS current_warehouse_id,su.warehouse_id,r.reversal_kind,r.return_id FROM serial_sale_units su JOIN serial_units x ON x.id=su.unit_id AND x.business_id=su.business_id LEFT JOIN serial_sale_reversals r ON r.unit_id=su.unit_id AND r.sale_id=su.sale_id AND r.business_id=su.business_id WHERE su.business_id=? AND su.sale_id=? AND su.sale_item_id=? ORDER BY x.serial_number");
+    $s=$db->prepare("SELECT x.id AS unit_id,x.serial_number,x.product_id,x.status,x.warehouse_id AS current_warehouse_id,su.warehouse_id,r.reversal_kind,r.return_id,r.credit_adjustment_id FROM serial_sale_units su JOIN serial_units x ON x.id=su.unit_id AND x.business_id=su.business_id LEFT JOIN serial_sale_reversals r ON r.unit_id=su.unit_id AND r.sale_id=su.sale_id AND r.business_id=su.business_id WHERE su.business_id=? AND su.sale_id=? AND su.sale_item_id=? ORDER BY x.serial_number");
     $s->execute([$biz,$sale,$line]);$rows=$s->fetchAll();$s->closeCursor();return $rows;
 }
-function serialRestoreUnits(PDO $db,array $actor,int $sale,int $line,int $pid,int $warehouse,array $numbers,string $kind,?int $returnId,string $reason): void {
+function serialRestoreUnits(PDO $db,array $actor,int $sale,int $line,int $pid,int $warehouse,array $numbers,string $kind,?int $returnId,string $reason,?int $creditAdjustmentId=null): void {
     $biz=(int)$actor['business_id'];$uid=(int)$actor['id'];
+    if($creditAdjustmentId!==null&&$returnId!==null)throw new RuntimeException('Origen de reversa ambiguo.');
     if(!in_array($kind,['commercial','warranty','void'],true)||!$numbers)throw new RuntimeException('Reversa serializada inválida.');
     $w=$db->prepare('SELECT id FROM warehouses WHERE id=? AND business_id=? AND is_active=1 FOR UPDATE');$w->execute([$warehouse,$biz]);if(!$w->fetchColumn())fail('La bodega histórica no está activa; revisar destino antes de devolver.',409);$w->closeCursor();
     $get=$db->prepare("SELECT x.id FROM serial_sale_units su JOIN serial_units x ON x.id=su.unit_id AND x.business_id=su.business_id WHERE su.business_id=? AND su.sale_id=? AND su.sale_item_id=? AND su.warehouse_id=? AND x.product_id=? AND x.serial_number=? AND x.status='sold' AND x.warehouse_id=? AND NOT EXISTS(SELECT 1 FROM serial_sale_reversals rr WHERE rr.unit_id=su.unit_id AND rr.sale_id=su.sale_id) AND NOT EXISTS(SELECT 1 FROM serial_sale_units later WHERE later.unit_id=su.unit_id AND later.sale_id>su.sale_id) FOR UPDATE");
     $upd=$db->prepare("UPDATE serial_units SET status=?,warehouse_id=? WHERE business_id=? AND id=? AND status='sold'");
-    $ins=$db->prepare('INSERT INTO serial_sale_reversals(unit_id,sale_id,business_id,return_id,warehouse_id,actor_id,reversal_kind) VALUES(?,?,?,?,?,?,?)');
+    $ins=$db->prepare('INSERT INTO serial_sale_reversals(unit_id,sale_id,business_id,return_id,warehouse_id,actor_id,reversal_kind,credit_adjustment_id) VALUES(?,?,?,?,?,?,?,?)');
     $evt=$db->prepare('INSERT INTO serial_unit_events(business_id,unit_id,actor_id,event_type,details) VALUES(?,?,?,?,?)');
     foreach($numbers as $n){
         $get->execute([$biz,$sale,$line,$warehouse,$pid,$n,$warehouse]);$id=$get->fetchColumn();$get->closeCursor();
         if($id===false)throw new HttpError('Serie no vendida en esta línea, ya devuelta o no disponible: '.$n,409,'serial_numbers');
         $upd->execute([$kind==='warranty'?'warranty_hold':'in_stock',$warehouse,$biz,$id]);if($upd->rowCount()!==1)fail('Cambió el estado de la unidad.',409);
-        $ins->execute([$id,$sale,$biz,$returnId,$warehouse,$uid,$kind]);
-        $evt->execute([$biz,$id,$uid,$kind==='void'?'sale_voided':($kind==='warranty'?'warranty_return':'returned'),json_encode(['sale_id'=>$sale,'sale_item_id'=>$line,'return_id'=>$returnId,'warehouse_id'=>$warehouse,'reason'=>$reason],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE)]);
+        $ins->execute([$id,$sale,$biz,$returnId,$warehouse,$uid,$kind,$creditAdjustmentId]);
+        $evt->execute([$biz,$id,$uid,$kind==='void'?'sale_voided':($kind==='warranty'?'warranty_return':'returned'),json_encode(['sale_id'=>$sale,'sale_item_id'=>$line,'return_id'=>$returnId,'credit_adjustment_id'=>$creditAdjustmentId,'warehouse_id'=>$warehouse,'reason'=>$reason],JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE)]);
     }
 }
 function registerSerialRoutes(RouteCollectorProxy $group): void {

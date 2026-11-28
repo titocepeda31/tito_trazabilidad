@@ -56,7 +56,7 @@ function registerDashboardRoutes(RouteCollectorProxy $group):void {
         $db=db();$now=new DateTimeImmutable('now',new DateTimeZone('America/Santiago'));$today=$now->format('Y-m-d');[$start,$end]=dashboardDateRange($period,$now);
         $db->exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');$db->beginTransaction();
         try{
-            $financial=$period==='all_time'?titoCreditFinancialSummary($db,$biz):titoCreditFinancialPeriod($db,$biz,$period);
+            $financial=$period==='all_time'?titoCreditFinancialSummary($db,$biz):titoCreditFinancialPeriod($db,$biz,$period,$now);
             // Align all filters with the exact window returned by the financial helper (including midnight).
             if($period!=='all_time'){$utc=new DateTimeZone('UTC');$start=(new DateTimeImmutable($financial['window_start_local']))->setTimezone($utc)->format('Y-m-d H:i:s');$end=(new DateTimeImmutable($financial['window_end_local']))->setTimezone($utc)->format('Y-m-d H:i:s');}
             $where=$start===null?'':' AND created_at>=? AND created_at<?';$args=$start===null?[$biz]:[$biz,$start,$end];

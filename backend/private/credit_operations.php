@@ -173,10 +173,10 @@ function titoCreditFinancialSummary(PDO $db,int $biz): array {
  * Para TIMESTAMP se utiliza UNIX_TIMESTAMP, independiente de la zona de
  * sesión MySQL; refunded_at es DATETIME UTC guardado con UTC_TIMESTAMP().
  */
-function titoCreditFinancialPeriod(PDO $db,int $biz,string $period):array{
+function titoCreditFinancialPeriod(PDO $db,int $biz,string $period,?DateTimeImmutable $referenceNow=null):array{
     if(!in_array($period,['today','week','month'],true))fail('Período financiero inválido.',422);
     $tz=new DateTimeZone('America/Santiago');
-    $now=new DateTimeImmutable('now',$tz);
+    $now=$referenceNow!==null?$referenceNow->setTimezone($tz):new DateTimeImmutable('now',$tz);
     if($period==='today'){
         $start=$now->setTime(0,0);
         $end=$start->modify('+1 day');

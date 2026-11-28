@@ -1,5 +1,6 @@
 import React,{useEffect,useState} from 'react';
 import {pesos} from './api';
+import ProductPriceDraftPanel from './ProductPriceDraftPanel.jsx';
 
 export default function CurrencyPanel({request}){
  const [settings,setSettings]=useState(null),[date,setDate]=useState(''),[today,setToday]=useState(''),[rate,setRate]=useState(null),[value,setValue]=useState(''),[source,setSource]=useState(''),[amount,setAmount]=useState(''),[preview,setPreview]=useState(null),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[error,setError]=useState('');
@@ -16,5 +17,5 @@ export default function CurrencyPanel({request}){
  </section><section className="panel pad"><h3>Valor diario de la UF</h3><label>Fecha de referencia<input type="date" value={date} max={today} disabled={busy} onChange={e=>{setDate(e.target.value);setRate(null);setPreview(null);}}/></label>
  {rate?<p>UF registrada: {rate.clp_per_uf} CLP · versión {rate.id} · {rate.source_reference}</p>:<p className="muted">Sin valor registrado para la fecha.</p>}
  <form className="formstack" onSubmit={saveRate}><label>CLP por UF<input required inputMode="decimal" value={value} onChange={e=>setValue(e.target.value)} placeholder="40000,00" disabled={busy}/></label><label>Fuente oficial / referencia<input required maxLength={250} value={source} onChange={e=>setSource(e.target.value)} disabled={busy}/></label><button className="primary" disabled={busy||!date}>Registrar valor</button></form></section>
- <section className="panel pad"><h3>Simular conversión</h3><form className="formstack" onSubmit={convert}><label>Monto UF<input required inputMode="decimal" value={amount} disabled={busy} onChange={e=>{setAmount(e.target.value);setPreview(null);}}/></label><button className="primary" disabled={busy||!rate}>Calcular</button></form>{preview&&<p role="status"><strong>{preview.amount} UF = {pesos(preview.total_clp)}</strong> · {preview.rate.rate_on} · versión {preview.rate.id}. Solo referencia.</p>}</section></>;
+ <section className="panel pad"><h3>Simular conversión</h3><form className="formstack" onSubmit={convert}><label>Monto UF<input required inputMode="decimal" value={amount} disabled={busy} onChange={e=>{setAmount(e.target.value);setPreview(null);}}/></label><button className="primary" disabled={busy||!rate}>Calcular</button></form>{preview&&<p role="status"><strong>{preview.amount} UF = {pesos(preview.total_clp)}</strong> · {preview.rate.rate_on} · versión {preview.rate.id}. Solo referencia.</p>}</section>{settings&&<ProductPriceDraftPanel request={request} today={today} defaultUnit={settings.default_unit}/>}</>;
 }

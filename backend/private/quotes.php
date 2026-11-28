@@ -342,7 +342,7 @@ function registerQuoteRoutes(RouteCollectorProxy $group): void {
             if($r['expires_on']===$expiry)fail('La fecha no cambió.',422);
             $s=$db->prepare('UPDATE serial_reservations SET expires_on=? WHERE business_id=? AND id=?');$s->execute([$expiry,$biz,$resId]);
             $s=$db->prepare("UPDATE quotes SET revision=revision+1 WHERE business_id=? AND id=? AND status='reserved'");$s->execute([$biz,$qid]);
-            quoteEvent($db,$biz,$qid,$uid,'reservation_expiry_changed','reserved','reserved',$reason,['reservation_id'=>$resId,'before'=>$r['expires_on'],'after'=>$expiry],$rid,$hash);
+            quoteEvent($db,$biz,$qid,$uid,'reservation_date_changed','reserved','reserved',$reason,['reservation_id'=>$resId,'before'=>$r['expires_on'],'after'=>$expiry],$rid,$hash);
             $db->commit();return respond($response,['ok'=>true]);
         }catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;}
     });

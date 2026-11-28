@@ -11,12 +11,13 @@ function registerCatalogMaintenanceRoutes(RouteCollectorProxy $group): void {
         $admin=adminOnly($request);
         $biz=(int)$admin['business_id']; $uid=(int)$admin['id'];$id=(int)$args['id'];
         $b=requestBody($request);
-        $allowed=['name','sku','barcode','price_clp'];
+        $allowed=['name','sku','barcode','price_clp','generate_missing_sku'];
+        $autoSku=$b['generate_missing_sku']??false;if(!is_bool($autoSku))fail('Opción de SKU inválida.',422);
         if(!array_intersect($allowed,array_keys($b)))fail('No hay cambios.',422);
         foreach(array_keys($b) as $field){if(!in_array($field,$allowed,true))fail('Campo de producto no editable: '.$field,422);}
         $db=db();
         try{
-            $db->beginTransaction();
+            $db->beginTransaction();originLockCompany($db,$biz);
             $st=$db->prepare('SELECT id,name,sku,barcode,price_clp FROM products WHERE id=? AND business_id=? AND is_active=1 FOR UPDATE');
             $st->execute([$id,$biz]);$original=$st->fetch();$st->closeCursor();
             if(!$original)fail('Producto no encontrado.',404);
@@ -31,7 +32,8 @@ function registerCatalogMaintenanceRoutes(RouteCollectorProxy $group): void {
                 if($v!==null && mb_strlen(trim($v))>50)fail('Código demasiado largo: '.$field,422);
                 $next[$field]=$v===null?null:(trim($v)===''?null:trim($v));
             }
-            if($next['sku']===null && $next['barcode']===null)fail('Ingresa SKU o código de barras.',422);
+            if($autoSku&&$next['sku']===null)$next['sku']=$old['sku']??productAutoSku($db,$biz);
+            if($next['sku']===null && $next['barcode']===null)fail('Ingresa SKU o código de barras, o activa la generación automática.',422);
             if($old===$next){$db->commit();return respond($response,['ok'=>true,'changed'=>false,'product_id'=>$id]);}
             $st=$db->prepare('UPDATE products SET name=?,sku=?,barcode=?,price_clp=? WHERE id=? AND business_id=?');
             $st->execute([$next['name'],$next['sku'],$next['barcode'],$next['price_clp'],$id,$biz]);

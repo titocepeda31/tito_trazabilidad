@@ -12,6 +12,7 @@ require __DIR__ . '/../vendor/autoload.php';
 require __DIR__ . '/../private/bootstrap.php';
 require __DIR__ . '/../private/http.php';
 require __DIR__ . '/../private/import_products.php';
+require __DIR__ . '/../private/product_labels.php';
 require __DIR__ . '/../private/users_sales.php';
 require __DIR__ . '/../private/access_roles.php';
 require __DIR__ . '/../private/organization.php';
@@ -179,17 +180,20 @@ $app->group('', static function(RouteCollectorProxy $group): void {
             $value=$value===null?null:(trim($value)?:null);
         }
         unset($value);
-        if($sku===null&&$barcode===null)fail('Ingresa SKU o código de barras.',422);
+        $autoSku=$b['generate_missing_sku']??false;if(!is_bool($autoSku))fail('Opción de SKU inválida.',422);
+        if($sku===null&&$barcode===null&&!$autoSku)fail('Ingresa SKU o código de barras, o activa la generación automática.',422);
         $db=db();
         try{
             $db->beginTransaction();
+            originLockCompany($db,$biz);
+            if($autoSku&&$sku===null)$sku=productAutoSku($db,$biz);
             titoProductCreationActor($db,$biz,$uid,'manual');
             $st=$db->prepare('INSERT INTO products(business_id,name,sku,barcode,price_clp,sale_unit,stock_qty) VALUES (?,?,?,?,?,?,?)');
             $st->execute([$biz,$name,$sku,$barcode,$price,$unit,$stock]);
             $id=(int)$db->lastInsertId();
             if((float)$stock>0)move($db,$biz,$id,null,$uid,'initial',$stock,$stock,'Stock inicial');
             $db->commit();
-            return respond($response,['ok'=>true,'product_id'=>$id],201);
+            return respond($response,['ok'=>true,'product_id'=>$id,'sku'=>$sku],201);
         }catch(Throwable $e){
             if($db->inTransaction())$db->rollBack();
             if($e instanceof PDOException && (int)($e->errorInfo[1]??0)===1062)fail('SKU o código de barras duplicado.',409);
@@ -370,6 +374,7 @@ $app->group('', static function(RouteCollectorProxy $group): void {
     registerDashboardRoutes($group);
     registerReservationRoutes($group);
     registerCatalogMaintenanceRoutes($group);
+    registerLabelRoutes($group);
     registerGoodsReceiptRoutes($group);
     registerInventoryReportRoutes($group);
     registerQuoteRoutes($group);

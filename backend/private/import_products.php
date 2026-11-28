@@ -6,6 +6,7 @@ function importProducts(PDO $db,int $businessId,int $userId,array $input): array
     $importId=$input['import_id']??null;
     $chunk=$input['chunk_index']??null;
     $mode=$input['stock_mode']??'preserve_existing';
+    $autoSku=$input['generate_missing_sku']??false;if(!is_bool($autoSku))fail('Opción de SKU inválida.',422);
     // Clientes anteriores sin warehouse_id continúan usando el local original.
     // La interfaz multisucursal nueva siempre envía un ID explícito.
     $warehouseId=$input['warehouse_id']??null;
@@ -28,7 +29,7 @@ function importProducts(PDO $db,int $businessId,int $userId,array $input): array
             if($code!==null&&strlen($code)>50)fail('Código demasiado largo en fila '.($index+1).'.',422);
             if($field==='sku')$sku=$code?:null;else $barcode=$code?:null;
         }
-        if($sku===null&&$barcode===null)fail('Se necesita SKU o código de barras en fila '.($index+1).'.',422);
+        if($sku===null&&$barcode===null&&!$autoSku)fail('Se necesita SKU o código de barras en fila '.($index+1).'.',422);
         if($sku!==null){
             $key=mb_strtoupper($sku,'UTF-8');
             if(isset($seenSkus[$key]))fail('Hay SKU duplicados en el lote.',422);
@@ -53,6 +54,7 @@ function importProducts(PDO $db,int $businessId,int $userId,array $input): array
     $hashData=$warehouseId===null
         ?['mode'=>$mode,'rows'=>$validated]
         :['mode'=>$mode,'warehouse_id'=>$warehouseId,'rows'=>$validated];
+    if($autoSku)$hashData['generate_missing_sku']=true;
     $payloadHash=hash('sha256',json_encode($hashData,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE));
     $prior=$db->prepare('SELECT payload_hash,result_json FROM product_import_chunks WHERE business_id=? AND import_id=? AND chunk_index=?');
     $summary=['created'=>0,'updated'=>0,'unchanged'=>0,'stock_adjusted'=>0];
@@ -64,7 +66,7 @@ function importProducts(PDO $db,int $businessId,int $userId,array $input): array
         return ['ok'=>true,'already_recorded'=>true,'summary'=>$data];
     };
     try{
-        $db->beginTransaction();
+        $db->beginTransaction();originLockCompany($db,$businessId);
         if($warehouseId===null){
             $st=$db->prepare("SELECT id,name FROM warehouses WHERE business_id=? AND code='local' AND is_active=1 FOR UPDATE");
             $st->execute([$businessId]);
@@ -89,6 +91,10 @@ function importProducts(PDO $db,int $businessId,int $userId,array $input): array
             if(count($matches)>1)fail('SKU y código de barras pertenecen a productos diferentes. Corrige el Excel.',409);
             $old=$matches[0]??null;
             if(!$old){
+                if($r['sku']===null&&$r['barcode']===null){
+                    $check=$db->prepare('SELECT id FROM products WHERE business_id=? AND name=? LIMIT 1 FOR UPDATE');$check->execute([$businessId,$r['name']]);$existing=$check->fetchColumn();$check->closeCursor();if($existing)fail('Producto sin código con nombre ya existente: '.$r['name'].'. Identifica su SKU antes de importar.',409);
+                }
+                if($autoSku&&$r['sku']===null)$r['sku']=productAutoSku($db,$businessId);
                 // El trigger crea saldos en cero en todas las ubicaciones.
                 // El stock del archivo entra SOLAMENTE en la sucursal elegida.
                 $create->execute([$businessId,$r['name'],$r['sku'],$r['barcode'],$r['price'],$r['unit']]);
@@ -106,6 +112,7 @@ function importProducts(PDO $db,int $businessId,int $userId,array $input): array
             if($r['sku']!==null&&$old['sku']!==null&&strcasecmp($old['sku'],$r['sku'])!==0)fail('Conflicto de SKU para '.$r['name'],409);
             if($r['barcode']!==null&&$old['barcode']!==null&&strcasecmp($old['barcode'],$r['barcode'])!==0)fail('Conflicto de código de barras para '.$r['name'],409);
             $sku=$old['sku']??$r['sku'];$barcode=$old['barcode']??$r['barcode'];
+            if($autoSku&&$sku===null)$sku=productAutoSku($db,$businessId);
             $pid=(int)$old['id'];
             $delta=0.0;
             if($mode!=='preserve_existing'){

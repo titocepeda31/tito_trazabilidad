@@ -14,6 +14,7 @@ import WarrantiesPanel from './WarrantiesPanel.jsx';
 import ClientsPanel from './ClientsPanel.jsx';
 import FinancialSummary from './FinancialSummary.jsx';
 import ManagementDashboard from './ManagementDashboard.jsx';
+import LabelsPanel from './LabelsPanel.jsx';
 import WarehousesPanel from './WarehousesPanel.jsx';
 import AccountPanel from './AccountPanel.jsx';
 import OrganizationPanel from './OrganizationPanel.jsx';
@@ -48,6 +49,7 @@ const menu = [
   { key: 'inicio', label: 'Inicio', ico: '▦' },
   { key: 'inventario', label: 'Inventario', ico: '▤' },
   { key: 'importar', label: 'Importar', ico: '⇧' },
+  { key: 'etiquetas', label: 'Etiquetas', ico: '▤' },
   { key: 'recepciones', label: 'Mercadería', ico: '▣' },
   { key: 'bodegas', label: 'Bodegas', ico: '▤' },
   { key: 'terminal', label: 'Identificación de caja', ico: '⌁' },
@@ -275,7 +277,7 @@ function App() {
   const pendingApprovals=approvalRequests.filter(r=>r.status==='pending').length;
   const canApproveDiscounts=isAdmin||staffPermissions.can_approve_discounts;
   const canSellCredit=isAdmin||staffPermissions.can_sell_credit;
-  const visibleMenu = isAdmin ? menu : menu.filter(m => !['importar','usuarios','recepciones','cotizaciones','bodegas','devoluciones','servicio','garantias','clientes','organizacion','roles','puntosventa','origen','series','trazabilidad'].includes(m.key) && (m.key!=='aprobaciones'||canApproveDiscounts));
+  const visibleMenu = isAdmin ? menu : menu.filter(m => !['importar','usuarios','recepciones','cotizaciones','bodegas','devoluciones','servicio','garantias','clientes','organizacion','roles','puntosventa','origen','series','trazabilidad','etiquetas'].includes(m.key) && (m.key!=='aprobaciones'||canApproveDiscounts));
   const critical = products.filter(p => Number(p.stock_qty) <= 5);
   const stockValue = products.reduce((total,p) => total + Number(p.stock_qty) * Number(p.price_clp), 0);
   const dateCL = d => d.toLocaleDateString('sv-SE', {timeZone:'America/Santiago'});
@@ -312,6 +314,7 @@ function App() {
         </>}
         {page==='inventario' && <Inventory products={products} onChange={()=>refresh(false)} request={request} notify={notify} canManage={isAdmin} onOpenHistory={()=>setPage('auditoria')} />}
         {page==='auditoria' && isAdmin && <InventoryHistory request={request} notify={notify} products={products} onBack={()=>setPage('inventario')} />}
+        {page==='etiquetas' && isAdmin && <LabelsPanel request={request}/>}
         {page==='importar' && <ImportPanel request={request} refresh={()=>refresh(false)} notify={notify} />}
         {page==='recepciones' && isAdmin && <ReceiptsPanel products={products} request={request} onChange={()=>refresh(false)} notify={notify} />}
         {page==='bodegas' && isAdmin && <WarehousesPanel request={request} notify={notify} onChange={()=>refresh(false)} />}
@@ -409,7 +412,7 @@ function Inventory({products,request,onChange,notify,canManage,onOpenHistory}) {
   useEffect(()=>setInventoryPage(1),[query,stockView,stockOrder,stockLocation]);
   async function add(e) {
     e.preventDefault(); const f=new FormData(e.currentTarget); setSaving(true);
-    try { await request('/products',{method:'POST',body:{name:String(f.get('name')).trim(),sku:String(f.get('sku')).trim()||null,barcode:String(f.get('barcode')).trim()||null,price_clp:Number(f.get('price')),stock_qty:Number(f.get('stock')),sale_unit:String(f.get('unit'))}}); notify('Producto creado correctamente.','success');setShowNew(false);onChange(); }
+    try { await request('/products',{method:'POST',body:{name:String(f.get('name')).trim(),sku:String(f.get('sku')).trim()||null,barcode:String(f.get('barcode')).trim()||null,generate_missing_sku:f.get('auto_sku')==='on',price_clp:Number(f.get('price')),stock_qty:Number(f.get('stock')),sale_unit:String(f.get('unit'))}}); notify('Producto creado correctamente.','success');setShowNew(false);onChange(); }
     catch(err){notify(err.message,'error');} finally{setSaving(false);}
   }
   async function editProduct(e) {
@@ -420,9 +423,10 @@ function Inventory({products,request,onChange,notify,canManage,onOpenHistory}) {
       name:String(f.get('name')||'').trim(),
       sku:String(f.get('sku')||'').trim()||null,
       barcode:String(f.get('barcode')||'').trim()||null,
-      price_clp:Number(f.get('price'))
+      price_clp:Number(f.get('price')),
+      generate_missing_sku:f.get('auto_sku')==='on'
     };
-    if(!body.sku&&!body.barcode){notify('Debes ingresar un SKU o código de barras.','error');return;}
+    if(!body.sku&&!body.barcode&&!body.generate_missing_sku){notify('Debes ingresar un SKU o código de barras.','error');return;}
     setSaving(true);
     try{
       await request('/products/'+edit.id+'/update',{method:'POST',body});
@@ -488,12 +492,12 @@ function Inventory({products,request,onChange,notify,canManage,onOpenHistory}) {
       <div className="table-wrap"><table><thead><tr><th>Producto</th><th>SKU / Código</th><th>Precio</th><th>{chosenLocation?'Stock en '+chosenLocation.name:'Stock total'}</th><th></th></tr></thead><tbody>{inventoryPageData.rows.map(p=><tr key={p.id}><td><strong>{p.name}</strong><small className="sub">{p.sale_unit}</small></td><td className="mono">{p.sku||'—'}<small className="sub">{p.barcode||'Sin código de barras'}</small></td><td>{pesos(p.price_clp)}</td><td><span className={'pill '+(stockFor(p)===0?'red':stockFor(p)<=5?'amber':'green')}>{qtyFormat(stockFor(p))} {p.sale_unit}</span>{stockLocation==='total'&&locationById[Number(p.id)]&&<small className="sub">Local original: {qtyFormat(locationById[Number(p.id)].local)} · Bodega original: {qtyFormat(locationById[Number(p.id)].bodega)}</small>}</td><td>{canManage&&<div className="inline-actions"><button className="ghost mini" onClick={()=>setEdit(p)}>Editar</button><button className="ghost mini" onClick={()=>{setAdjustCode('local');setAdjust(p);}}>Ajustar stock</button></div>}</td></tr>)}</tbody></table>{stocksReady&&visible.length===0&&<Empty text="No hay productos que coincidan con estos filtros."/>}</div>
       <div className="list-pagination"><span>Mostrando {inventoryPageData.rows.length} de {inventoryPageData.total} productos filtrados · Página {inventoryPageData.page} de {inventoryPageData.pages}</span><div className="inline-actions"><button type="button" className="ghost mini" disabled={inventoryPageData.page<=1} onClick={()=>setInventoryPage(p=>p-1)}>← Anterior</button><button type="button" className="ghost mini" disabled={inventoryPageData.page>=inventoryPageData.pages} onClick={()=>setInventoryPage(p=>p+1)}>Siguiente →</button></div></div>
     </section>
-    {showNew && <Modal title="Nuevo producto" onClose={()=>setShowNew(false)}><form className="formstack" onSubmit={add}><label>Nombre<input required name="name" maxLength="120" placeholder="Ej. Tornillo 2 pulgadas"/></label><div className="field-row"><label>SKU<input name="sku" maxLength="50" placeholder="FER-001"/></label><label>Código de barras<input name="barcode" maxLength="50" placeholder="780…"/></label></div><div className="field-row"><label>Precio (CLP)<input name="price" type="number" min="0" max="1000000000" step="1" required /></label><label>Stock inicial<input name="stock" type="number" min="0" max="1000000000" step="0.001" defaultValue="0" required /></label></div><label>Unidad<select name="unit"><option value="unidad">Unidad</option><option value="kg">Kg</option><option value="litro">Litro</option></select></label><p className="helper">Debes ingresar al menos un SKU o código de barras.</p><button className="primary wide" disabled={saving}>{saving?'Guardando…':'Guardar producto'}</button></form></Modal>}
+    {showNew && <Modal title="Nuevo producto" onClose={()=>setShowNew(false)}><form className="formstack" onSubmit={add}><label>Nombre<input required name="name" maxLength="120" placeholder="Ej. Tornillo 2 pulgadas"/></label><div className="field-row"><label>SKU<input name="sku" maxLength="50" placeholder="FER-001"/></label><label>Código de barras<input name="barcode" maxLength="50" placeholder="780…"/></label></div><div className="field-row"><label>Precio (CLP)<input name="price" type="number" min="0" max="1000000000" step="1" required /></label><label>Stock inicial<input name="stock" type="number" min="0" max="1000000000" step="0.001" defaultValue="0" required /></label></div><label>Unidad<select name="unit"><option value="unidad">Unidad</option><option value="kg">Kg</option><option value="litro">Litro</option></select></label><label><input type="checkbox" name="auto_sku"/> Generar SKU interno si queda vacío</label><p className="helper">Conserva los códigos del proveedor. Si no hay SKU ni código de barras, activa la generación automática.</p><button className="primary wide" disabled={saving}>{saving?'Guardando…':'Guardar producto'}</button></form></Modal>}
     {edit&&<Modal title={'Editar producto · '+edit.name} onClose={()=>setEdit(null)}>
       <form className="formstack" onSubmit={editProduct}>
         <label>Nombre<input name="name" required maxLength="120" defaultValue={edit.name}/></label>
         <div className="field-row"><label>SKU<input name="sku" maxLength="50" defaultValue={edit.sku||''}/></label><label>Código de barras<input name="barcode" maxLength="50" defaultValue={edit.barcode||''}/></label></div>
-        <label>Precio de lista (CLP)<input name="price" type="number" min="0" max="1000000000" step="1" defaultValue={edit.price_clp} required/></label>
+        {!edit.sku&&<label><input type="checkbox" name="auto_sku"/> Asignar SKU interno si queda vacío</label>}<label>Precio de lista (CLP)<input name="price" type="number" min="0" max="1000000000" step="1" defaultValue={edit.price_clp} required/></label>
         <p className="helper">Stock actual: {qtyFormat(edit.stock_qty)} {edit.sale_unit}. Para cambiar existencias, usa «Ajustar stock» y selecciona la ubicación. Las ventas anteriores conservan sus precios registrados.</p>
         <button className="primary wide" disabled={saving}>{saving?'Guardando…':'Guardar cambios'}</button>
       </form>
@@ -532,7 +536,8 @@ function ImportPanel({request,refresh,notify}) {
     return ()=>{alive=false;};
   },[]);
   const columns=matrix[0]?.map((v,i)=>String(v??`Columna ${i+1}`))??[];
-  const preview=useMemo(()=>matrix.length>1&&mapping ? validateRows(matrix.slice(1),mapping) : {rows:[],errors:[]},[matrix,mapping]);
+  const [autoSku,setAutoSku]=useState(false);
+  const preview=useMemo(()=>matrix.length>1&&mapping ? validateRows(matrix.slice(1),mapping,autoSku) : {rows:[],errors:[]},[matrix,mapping,autoSku]);
   const mustMap=['name','price_clp'];const missing=mustMap.some(k=>mapping?.[k]<0);
   const needsStock=mode!=='preserve_existing' && preview.rows.some(r=>r.stock_qty===null);
   const selectedWarehouse=warehouses.find(w=>String(w.id)===warehouseId);
@@ -565,7 +570,7 @@ function ImportPanel({request,refresh,notify}) {
         setProgress(`Importando lote ${chunk_index+1} de ${Math.ceil(all.length/30)}…`);
         const data=await request('/products/import',{method:'POST',body:{
           import_id:payload.import_id,chunk_index,warehouse_id:payload.warehouse_id,
-          stock_mode:payload.stock_mode,rows:all.slice(i,i+30)
+          stock_mode:payload.stock_mode,...(payload.generate_missing_sku?{generate_missing_sku:true}:{}),rows:all.slice(i,i+30)
         }});
         for(const key of Object.keys(summary))summary[key]+=Number(data.summary?.[key]||0);
       }
@@ -588,7 +593,7 @@ function ImportPanel({request,refresh,notify}) {
     if(!window.confirm('Destino: '+selectedWarehouse.name+'\nAcción: '+action+'.\nProductos: '+preview.rows.length+'. ¿Confirmas la importación?'))return;
     const payload={
       import_id:newId(),warehouse_id:Number(selectedWarehouse.id),
-      warehouse_name:selectedWarehouse.name,stock_mode:mode,
+      warehouse_name:selectedWarehouse.name,stock_mode:mode,generate_missing_sku:autoSku,
       rows:preview.rows.map(({rowNumber,problems,...r})=>r)
     };
     sessionStorage.setItem('tito_pending_inventory_import',JSON.stringify(payload));
@@ -607,7 +612,7 @@ function ImportPanel({request,refresh,notify}) {
       <small>{warehouseLoading?'Cargando ubicaciones…':selectedWarehouse?'Las existencias se cargarán únicamente en '+selectedWarehouse.name+'. Las demás sucursales conservarán sus cantidades.':'No hay una ubicación válida. Comprueba las bodegas antes de importar.'}</small>
     </div>
     <label className="file-drop"><span className="file-glyph">⇧</span><strong>{fileName || 'Selecciona un archivo Excel o CSV'}</strong><span>Formatos .xlsx y .csv · Máximo 10 MB · Primera hoja del Excel</span><input type="file" accept=".xlsx,.csv" onChange={loadFile} disabled={busy||Boolean(pendingImport)||warehouseLoading}/></label>
-    {matrix.length>0&&<><div className="panel-heading extra-top"><div><h3>Asignación de columnas</h3><p>{preview.rows.length} productos detectados · Revisa antes de continuar</p></div></div><div className="mapping-grid">{headers.map(h=><label key={h}><span>{({sku:'SKU',barcode:'Código de barras',name:'Nombre *',price_clp:'Precio CLP *',stock_qty:'Stock',sale_unit:'Unidad'})[h]}</span><select value={mapping?.[h]??-1} onChange={e=>setMapping(m=>({...m,[h]:Number(e.target.value)}))}><option value="-1">— No incluir —</option>{columns.map((c,i)=><option key={i} value={i}>{c}</option>)}</select></label>)}</div>
+    {matrix.length>0&&<><label><input type="checkbox" checked={autoSku} disabled={busy||Boolean(pendingImport)} onChange={e=>setAutoSku(e.target.checked)}/> Generar SKU interno donde falte (conservar SKU existente; identificar coincidencias por código de barras)</label>{autoSku&&<p className="helper">Los productos sin ambos códigos serán nuevos. Si ya existe un nombre coincidente, el lote se bloqueará para revisión. No volver a importar sin identificadores después de completar una carga: conserva el catálogo exportado con sus códigos.</p>}<div className="panel-heading extra-top"><div><h3>Asignación de columnas</h3><p>{preview.rows.length} productos detectados · Revisa antes de continuar</p></div></div><div className="mapping-grid">{headers.map(h=><label key={h}><span>{({sku:'SKU',barcode:'Código de barras',name:'Nombre *',price_clp:'Precio CLP *',stock_qty:'Stock',sale_unit:'Unidad'})[h]}</span><select value={mapping?.[h]??-1} onChange={e=>setMapping(m=>({...m,[h]:Number(e.target.value)}))}><option value="-1">— No incluir —</option>{columns.map((c,i)=><option key={i} value={i}>{c}</option>)}</select></label>)}</div>
     <div className="stock-options"><strong>Stock de productos existentes en el destino</strong>
       <label><input type="radio" name="stockmode" value="preserve_existing" checked={mode==='preserve_existing'} disabled={busy||Boolean(pendingImport)} onChange={()=>setMode('preserve_existing')}/> Conservar las existencias actuales <span>(recomendado)</span></label>
       <label><input type="radio" name="stockmode" value="add_excel" checked={mode==='add_excel'} disabled={busy||Boolean(pendingImport)} onChange={()=>setMode('add_excel')}/> Sumar cantidades del Excel al destino</label>
@@ -615,7 +620,7 @@ function ImportPanel({request,refresh,notify}) {
       <small>Los productos nuevos entran en la ubicación elegida con la cantidad del archivo. Los existentes solo cambian su cantidad en esa ubicación cuando eliges sumar o reemplazar. El catálogo y los precios son compartidos entre sucursales.</small>
     </div>
     <div className="panel-heading extra-top"><div><h3>Vista previa</h3><p>Primeras 12 filas · Los errores se deben corregir antes de importar</p></div><span className={'pill '+(preview.errors.length?'amber':'green')}>{preview.errors.length} errores</span></div>
-    <div className="table-wrap"><table><thead><tr><th>#</th><th>Producto</th><th>SKU / Barras</th><th>Precio</th><th>Stock</th></tr></thead><tbody>{preview.rows.slice(0,12).map(r=><tr key={r.rowNumber}><td>{r.rowNumber}</td><td>{r.name||'—'}</td><td className="mono">{r.sku||r.barcode||'—'}</td><td>{Number.isFinite(r.price_clp)?pesos(r.price_clp):'Error'}</td><td>{r.stock_qty===null?'—':qtyFormat(r.stock_qty)}</td></tr>)}</tbody></table></div>
+    <div className="table-wrap"><table><thead><tr><th>#</th><th>Producto</th><th>SKU / Barras</th><th>Precio</th><th>Stock</th></tr></thead><tbody>{preview.rows.slice(0,12).map(r=><tr key={r.rowNumber}><td>{r.rowNumber}</td><td>{r.name||'—'}</td><td className="mono">{r.sku||r.barcode||(autoSku?'SKU automático':'—')}{autoSku&&!r.sku&&r.barcode&&<small className="sub">Asignar SKU si falta</small>}</td><td>{Number.isFinite(r.price_clp)?pesos(r.price_clp):'Error'}</td><td>{r.stock_qty===null?'—':qtyFormat(r.stock_qty)}</td></tr>)}</tbody></table></div>
     {preview.errors.length>0&&<div className="error-list"><strong>Problemas detectados:</strong>{preview.errors.slice(0,12).map(x=><p key={x.row}>Fila {x.row}: {x.text}</p>)}{preview.errors.length>12&&<p>Y {preview.errors.length-12} errores más…</p>}</div>}
     {missing&&<p className="error-inline">Asigna las columnas Nombre y Precio.</p>}{needsStock&&<p className="error-inline">Para sumar o reemplazar stock, todas las filas necesitan cantidades.</p>}{tooMany&&<p className="error-inline">Límite de este MVP: 1000 productos por archivo. Divide el archivo y revisa el total cargado.</p>}
     <div className="action-bar"><span className="muted">{progress||'La importación cambia datos reales de MySQL.'}</span><button className="primary" disabled={!valid||busy||Boolean(pendingImport)||warehouseLoading} onClick={submit}>{busy?'Procesando…':`Importar ${preview.rows.length} productos`}</button></div>

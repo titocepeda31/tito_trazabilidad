@@ -44,8 +44,8 @@ function numberFromCell(v, integer = false) {
   const result = Number(s);
   return Number.isFinite(result) && (!integer || Number.isInteger(result)) ? result : NaN;
 }
-export function validateRows(data, mapping) {
-  const results = [], errors = [], skus = new Map(), barcodes = new Map();
+export function validateRows(data, mapping, autoSku=false) {
+  const results = [], errors = [], skus = new Map(), barcodes = new Map(), namesWithoutCodes = new Map();
   data.forEach((line, idx) => {
     if (line.every(empty)) return;
     const cell = (key) => mapping[key] >= 0 ? line[mapping[key]] : undefined;
@@ -59,7 +59,8 @@ export function validateRows(data, mapping) {
     const rawUnit = simplify(cell('sale_unit') || 'unidad');
     const unit = ['kg', 'kilogramo', 'kilogramos'].includes(rawUnit) ? 'kg' : ['litro','litros','l'].includes(rawUnit) ? 'litro' : rawUnit === 'unidad' || rawUnit === 'unidades' || rawUnit === 'un' ? 'unidad' : null;
     const problems = [];
-    if (!sku && !barcode) problems.push('Falta SKU o código de barras');
+    if (!sku && !barcode && !autoSku) problems.push('Falta SKU o código de barras');
+    if (!sku && !barcode && autoSku && name) {const key=name.toLocaleLowerCase('es-CL');if(namesWithoutCodes.has(key))problems.push('Nombre sin código repetido (fila '+namesWithoutCodes.get(key)+')');else namesWithoutCodes.set(key,idx+2);}
     if (!name || name.length > 120) problems.push('Nombre obligatorio (máx. 120)');
     if ((sku && sku.length > 50) || (barcode && barcode.length > 50)) problems.push('Código demasiado largo');
     if (!Number.isInteger(price) || price < 0 || price > 1000000000) problems.push('Precio CLP inválido');
